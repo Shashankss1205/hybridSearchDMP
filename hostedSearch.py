@@ -786,7 +786,7 @@ HTML_TEMPLATE = """
         }
 
         function formatFieldName(fieldName) {
-            return fieldName.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+            return fieldName.replace('_', ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
         }
 
         function getFieldIcon(fieldName) {
@@ -820,7 +820,7 @@ HTML_TEMPLATE = """
             resultsContainer.innerHTML = results.map((result, index) => {
                 const story = result.story;
                 const filename = story.filename || 'Unknown Story';
-                const title = filename.replace('.txt', '').replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                const title = filename.replace('.txt', '').replace(/-/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
                 
                 // Create story details
                 const storyFields = Object.entries(story).filter(([key, value]) => 
