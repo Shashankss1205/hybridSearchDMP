@@ -1,0 +1,1113 @@
+import os
+import json
+import pandas as pd
+import numpy as np
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+import requests
+from pinecone import Pinecone, ServerlessSpec
+from fuzzywuzzy import fuzz
+import re
+from typing import List, Dict, Any
+import ast
+from dataclasses import dataclass, asdict
+import logging
+from dotenv import load_dotenv
+import io
+import time
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for numpy types"""
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+app = Flask(__name__)
+CORS(app)
+app.json_encoder = NumpyEncoder
+
+class APIEmbeddingModel:
+    """API-based embedding model supporting multiple providers"""
+    
+    def __init__(self):
+        self.provider = os.getenv('EMBEDDING_PROVIDER', 'openai').lower()
+        self.api_key = None
+        self.base_url = None
+        self.model_name = None
+        self.dimension = None
+        
+        self._initialize_provider()
+    
+    def _initialize_provider(self):
+        """Initialize the embedding provider"""
+        if self.provider == 'openai':
+            self.api_key = os.getenv('OPENAI_API_KEY')
+            self.base_url = "https://api.openai.com/v1/embeddings"
+            self.model_name = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+            self.dimension = 1536  # text-embedding-3-small dimension
+            
+        elif self.provider == 'google':
+            self.api_key = os.getenv('GOOGLE_API_KEY')
+            self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+            self.model_name = "embedding-001"
+            self.dimension = 768
+            
+        elif self.provider == 'cohere':
+            self.api_key = os.getenv('COHERE_API_KEY')
+            self.base_url = "https://api.cohere.ai/v1/embed"
+            self.model_name = os.getenv('COHERE_EMBEDDING_MODEL', 'embed-english-light-v3.0')
+            self.dimension = 384
+            
+        elif self.provider == 'huggingface':
+            self.api_key = os.getenv('HUGGINGFACE_API_KEY')
+            self.model_name = os.getenv('HUGGINGFACE_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+            self.base_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.model_name}"
+            self.dimension = 384
+            
+        else:
+            # Fallback to local SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.local_model = SentenceTransformer('all-MiniLM-L6-v2')
+                self.provider = 'local'
+                self.dimension = 384
+                logger.info("Using local SentenceTransformer model")
+            except ImportError:
+                raise ValueError("No valid embedding provider configured and sentence-transformers not available")
+        
+        if self.provider != 'local' and not self.api_key:
+            logger.warning(f"No API key found for {self.provider}, falling back to local model")
+            self._fallback_to_local()
+        else:
+            logger.info(f"Using {self.provider} embeddings with model: {self.model_name}")
+    
+    def _fallback_to_local(self):
+        """Fallback to local model if API fails"""
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.local_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.provider = 'local'
+            self.dimension = 384
+            logger.info("Fell back to local SentenceTransformer model")
+        except ImportError:
+            raise ValueError("Cannot fallback to local model - sentence-transformers not installed")
+    
+    def encode(self, texts: List[str], max_retries: int = 3) -> np.ndarray:
+        """Encode texts to embeddings"""
+        if self.provider == 'local':
+            return self.local_model.encode(texts)
+        
+        for attempt in range(max_retries):
+            try:
+                if self.provider == 'openai':
+                    return self._encode_openai(texts)
+                elif self.provider == 'google':
+                    return self._encode_google(texts)
+                elif self.provider == 'cohere':
+                    return self._encode_cohere(texts)
+                elif self.provider == 'huggingface':
+                    return self._encode_huggingface(texts)
+                    
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed for {self.provider}: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"All attempts failed, falling back to local model")
+                    self._fallback_to_local()
+                    return self.local_model.encode(texts)
+                time.sleep(2 ** attempt)  # Exponential backoff
+    
+    def _encode_openai(self, texts: List[str]) -> np.ndarray:
+        """OpenAI embeddings"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "input": texts,
+            "model": self.model_name
+        }
+        
+        response = requests.post(self.base_url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        embeddings = [item['embedding'] for item in result['data']]
+        return np.array(embeddings)
+    
+    def _encode_google(self, texts: List[str]) -> np.ndarray:
+        """Google embeddings"""
+        embeddings = []
+        
+        for text in texts:
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": f"models/{self.model_name}",
+                "content": {
+                    "parts": [{"text": text}]
+                }
+            }
+            
+            url = f"{self.base_url}?key={self.api_key}"
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            embeddings.append(result['embedding']['values'])
+        
+        return np.array(embeddings)
+    
+    def _encode_cohere(self, texts: List[str]) -> np.ndarray:
+        """Cohere embeddings"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "texts": texts,
+            "model": self.model_name,
+            "input_type": "search_document"
+        }
+        
+        response = requests.post(self.base_url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        return np.array(result['embeddings'])
+    
+    def _encode_huggingface(self, texts: List[str]) -> np.ndarray:
+        """Hugging Face Inference API embeddings"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "inputs": texts,
+            "options": {"wait_for_model": True}
+        }
+        
+        response = requests.post(self.base_url, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        
+        result = response.json()
+        return np.array(result)
+    
+    def get_sentence_embedding_dimension(self) -> int:
+        """Get embedding dimension"""
+        return self.dimension
+
+@dataclass
+class Story:
+    """Data class representing a story"""
+    id: str
+    filename: str
+    character_primary: List[str]
+    character_secondary: List[str]
+    setting_primary: List[str]
+    setting_secondary: List[str]
+    theme_primary: List[str]
+    theme_secondary: List[str]
+    events_primary: List[str]
+    events_secondary: List[str]
+    emotions_primary: List[str]
+    emotions_secondary: List[str]
+    keywords: List[str]
+
+@dataclass
+class SearchResult:
+    """Data class for search results"""
+    story: Story
+    score: float
+    matched_fields: Dict[str, float]
+
+class StorySearchEngine:
+    def __init__(self):
+        self.model = APIEmbeddingModel()
+        self.pc = None
+        self.index = None
+        self.stories = {}
+        
+        # Initialize Pinecone
+        self._init_pinecone()
+        
+        # Field weights for scoring
+        self.weights = {
+            'theme_primary': 0.25,
+            'theme_secondary': 0.15,
+            'events_primary': 0.20,
+            'events_secondary': 0.10,
+            'emotions_primary': 0.15,
+            'emotions_secondary': 0.08,
+            'setting_primary': 0.12,
+            'setting_secondary': 0.08,
+            'character_primary': 0.15,
+            'character_secondary': 0.10,
+            'keywords': 0.12
+        }
+        
+        # Semantic fields (will be embedded)
+        self.semantic_fields = [
+            'theme_primary', 'theme_secondary', 
+            'events_primary', 'events_secondary',
+            'emotions_primary', 'emotions_secondary',
+            'setting_primary', 'setting_secondary'
+        ]
+        
+        # Keyword fields (exact/fuzzy matching)
+        self.keyword_fields = ['character_primary', 'character_secondary', 'keywords']
+    
+    def _init_pinecone(self):
+        """Initialize Pinecone client and index"""
+        try:
+            api_key = os.getenv('PINECONE_API_KEY')
+            if not api_key:
+                logger.warning("PINECONE_API_KEY not found - running without Pinecone")
+                return
+            
+            self.pc = Pinecone(api_key=api_key)
+            
+            # Use provider-specific index name to avoid dimension conflicts
+            embedding_dim = self.model.get_sentence_embedding_dimension()
+            index_name = f"story-search-{self.model.provider}-{embedding_dim}"
+            
+            # Create index if it doesn't exist - use dynamic dimension
+            if index_name not in self.pc.list_indexes().names():
+                self.pc.create_index(
+                    name=index_name,
+                    dimension=embedding_dim,
+                    metric='cosine',
+                    spec=ServerlessSpec(
+                        cloud='aws',
+                        region='us-east-1'
+                    )
+                )
+                logger.info(f"Created Pinecone index: {index_name} with dimension {embedding_dim}")
+            else:
+                # Verify existing index has correct dimension
+                index_info = self.pc.describe_index(index_name)
+                existing_dim = index_info.dimension
+                if existing_dim != embedding_dim:
+                    logger.warning(f"Existing index {index_name} has dimension {existing_dim}, expected {embedding_dim}")
+                    # Delete and recreate index with correct dimension
+                    logger.info(f"Deleting old index {index_name} and creating new one")
+                    self.pc.delete_index(index_name)
+                    time.sleep(5)  # Wait for deletion
+                    self.pc.create_index(
+                        name=index_name,
+                        dimension=embedding_dim,
+                        metric='cosine',
+                        spec=ServerlessSpec(
+                            cloud='aws',
+                            region='us-east-1'
+                        )
+                    )
+                    logger.info(f"Created new Pinecone index: {index_name} with dimension {embedding_dim}")
+            
+            self.index = self.pc.Index(index_name)
+            logger.info(f"Pinecone initialized successfully with index: {index_name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone: {e}")
+            self.pc = None
+            self.index = None
+    
+    def _safe_eval_list(self, list_str: str) -> List[str]:
+        """Safely evaluate string representation of list"""
+        if pd.isna(list_str) or not list_str.strip():
+            return []
+        
+        try:
+            # Handle the case where it's already a list
+            if isinstance(list_str, list):
+                return list_str
+            
+            # Try to parse as JSON first
+            if list_str.startswith('[') and list_str.endswith(']'):
+                return ast.literal_eval(list_str)
+            
+            # Fallback: split by comma
+            return [item.strip().strip('"\'') for item in list_str.split(',')]
+        except Exception as e:
+            logger.warning(f"Failed to parse list string: {list_str}. Error: {e}")
+            return []
+    
+    def load_data(self, csv_path: str = None, csv_data: str = None):
+        """Load story data from CSV"""
+        try:
+            if csv_data:
+                # Parse from string data
+                df = pd.read_csv(io.StringIO(csv_data))
+            elif csv_path:
+                df = pd.read_csv(csv_path)
+            else:
+                raise ValueError("Either csv_path or csv_data must be provided")
+            
+            logger.info(f"Loaded {len(df)} stories from CSV")
+            
+            # Convert to Story objects
+            for idx, row in df.iterrows():
+                story_id = row['filename'].replace('.txt', '')
+                
+                story = Story(
+                    id=story_id,
+                    filename=row['filename'],
+                    character_primary=self._safe_eval_list(row['character_primary']),
+                    character_secondary=self._safe_eval_list(row['character_secondary']),
+                    setting_primary=self._safe_eval_list(row['setting_primary']),
+                    setting_secondary=self._safe_eval_list(row['setting_secondary']),
+                    theme_primary=self._safe_eval_list(row['theme_primary']),
+                    theme_secondary=self._safe_eval_list(row['theme_secondary']),
+                    events_primary=self._safe_eval_list(row['events_primary']),
+                    events_secondary=self._safe_eval_list(row['events_secondary']),
+                    emotions_primary=self._safe_eval_list(row['emotions_primary']),
+                    emotions_secondary=self._safe_eval_list(row['emotions_secondary']),
+                    keywords=self._safe_eval_list(row['keywords'])
+                )
+                
+                self.stories[story_id] = story
+            
+            logger.info(f"Processed {len(self.stories)} stories")
+            
+            # Create embeddings and upsert to Pinecone
+            if self.index:
+                self._create_embeddings()
+            
+        except Exception as e:
+            logger.error(f"Failed to load data: {e}")
+            raise
+    
+    def _create_embeddings(self):
+        """Create embeddings for semantic fields and upsert to Pinecone"""
+        try:
+            vectors_to_upsert = []
+            
+            for story_id, story in self.stories.items():
+                # Create combined text for each semantic field
+                for field in self.semantic_fields:
+                    field_values = getattr(story, field)
+                    if field_values:
+                        combined_text = ' '.join(field_values)
+                        
+                        # Create embedding
+                        embedding = self.model.encode([combined_text])[0].tolist()
+                        
+                        # Create vector ID
+                        vector_id = f"{story_id}_{field}"
+                        
+                        vectors_to_upsert.append({
+                            'id': vector_id,
+                            'values': embedding,
+                            'metadata': {
+                                'story_id': story_id,
+                                'field': field,
+                                'text': combined_text,
+                                'filename': story.filename
+                            }
+                        })
+            
+            # Upsert in batches
+            batch_size = 100
+            for i in range(0, len(vectors_to_upsert), batch_size):
+                batch = vectors_to_upsert[i:i + batch_size]
+                self.index.upsert(vectors=batch)
+            
+            logger.info(f"Upserted {len(vectors_to_upsert)} vectors to Pinecone")
+            
+        except Exception as e:
+            logger.error(f"Failed to create embeddings: {e}")
+    
+    def _keyword_search(self, query: str, field_values: List[str]) -> float:
+        """Perform keyword search with fuzzy matching"""
+        if not field_values or not query.strip():
+            return 0.0
+        
+        # Remove stop words and short words
+        stop_words = {
+            'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during',
+            'before', 'after', 'above', 'below', 'between', 'among', 'is', 'are',
+            'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
+            'did', 'will', 'would', 'should', 'could', 'can', 'may', 'might', 'must',
+            'story', 'stories', 'tale', 'book', 'novel'
+        }
+        
+        query_words = [
+            word.strip().lower() 
+            for word in re.split(r'[,\s]+', query) 
+            if word.strip() and len(word.strip()) >= 3 and word.strip().lower() not in stop_words
+        ]
+        
+        if not query_words:
+            return 0.0
+        
+        total_score = 0.0
+        field_text = ' '.join(field_values).lower()
+        
+        for query_word in query_words:
+            best_score = 0.0
+            
+            # Check exact match
+            if query_word in field_text:
+                best_score = 1.0
+            else:
+                # Fuzzy matching
+                for field_value in field_values:
+                    fuzzy_score = fuzz.partial_ratio(query_word, field_value.lower()) / 100.0
+                    if fuzzy_score >= 0.8:
+                        best_score = max(best_score, fuzzy_score * 0.8)
+            
+            total_score += best_score
+        
+        return total_score / len(query_words)
+    
+    def _semantic_search_local(self, query: str, story_id: str, field: str) -> float:
+        """Local semantic search when Pinecone is not available"""
+        story = self.stories.get(story_id)
+        if not story:
+            return 0.0
+        
+        field_values = getattr(story, field, [])
+        if not field_values:
+            return 0.0
+        
+        try:
+            # Create embeddings for comparison
+            query_embedding = self.model.encode([query])
+            field_text = ' '.join(field_values)
+            field_embedding = self.model.encode([field_text])
+            
+            # Calculate cosine similarity
+            from sklearn.metrics.pairwise import cosine_similarity
+            similarity = cosine_similarity(query_embedding, field_embedding)[0][0]
+            
+            # Convert to Python float and ensure bounds
+            similarity = float(similarity)
+            return max(0.0, min(1.0, similarity))
+            
+        except Exception as e:
+            logger.warning(f"Local semantic search failed for {story_id}.{field}: {e}")
+            return 0.0
+    
+    def search(self, query: str, top_k: int = 10) -> List[SearchResult]:
+        """Search stories using hybrid approach"""
+        if not query.strip():
+            return []
+        
+        results = {}
+        
+        # 1. Semantic search using Pinecone (if available) or local embeddings
+        if self.index:
+            try:
+                query_embedding = self.model.encode([query]).tolist()[0]
+                
+                # Search in Pinecone
+                search_results = self.index.query(
+                    vector=query_embedding,
+                    top_k=top_k * len(self.semantic_fields),
+                    include_metadata=True
+                )
+                
+                # Process semantic search results
+                for match in search_results['matches']:
+                    story_id = match['metadata']['story_id']
+                    field = match['metadata']['field']
+                    score = match['score']
+                    
+                    if story_id not in results:
+                        results[story_id] = {
+                            'story': self.stories[story_id],
+                            'scores': {},
+                            'total_score': 0.0
+                        }
+                    
+                    results[story_id]['scores'][field] = float(match['score'])
+                    results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
+                
+            except Exception as e:
+                logger.error(f"Pinecone search failed: {e}")
+        else:
+            # Fallback to local semantic search
+            for story_id, story in self.stories.items():
+                if story_id not in results:
+                    results[story_id] = {
+                        'story': story,
+                        'scores': {},
+                        'total_score': 0.0
+                    }
+                
+                for field in self.semantic_fields:
+                    score = self._semantic_search_local(query, story_id, field)
+                    # Ensure score is a Python float
+                    score = float(score) if score is not None else 0.0
+                    results[story_id]['scores'][field] = score
+                    results[story_id]['total_score'] += self.weights.get(field, 0.0) * score
+        
+        # 2. Keyword search for character and keyword fields
+        for story_id, story in self.stories.items():
+            if story_id not in results:
+                results[story_id] = {
+                    'story': story,
+                    'scores': {},
+                    'total_score': 0.0
+                }
+            
+            for field in self.keyword_fields:
+                field_values = getattr(story, field)
+                score = self._keyword_search(query, field_values)
+                # Ensure score is a Python float
+                score = float(score) if score is not None else 0.0
+                results[story_id]['scores'][field] = score
+                results[story_id]['total_score'] += self.weights.get(field, 0.0) * score
+        
+        # Convert to SearchResult objects and sort
+        search_results = []
+        for story_id, result_data in results.items():
+            if result_data['total_score'] > 0:
+                search_results.append(SearchResult(
+                    story=result_data['story'],
+                    score=result_data['total_score'],
+                    matched_fields=result_data['scores']
+                ))
+        
+        # Sort by score
+        search_results.sort(key=lambda x: x.score, reverse=True)
+        
+        return search_results[:top_k]
+
+# Initialize search engine
+search_engine = StorySearchEngine()
+
+# Load sample data on startup
+sample_csv_data = """filename,character_primary,character_secondary,setting_primary,setting_secondary,theme_primary,theme_secondary,events_primary,events_secondary,emotions_primary,emotions_secondary,keywords
+114184-how-bittu-bottu-got-better.txt,"[""Andy Prakash"", ""Bittu Bottu"", ""boy"", ""robot""]","[""Class teacher"", ""Amma (mother)"", ""Pa (father)"", ""Security Anna""]","[""School"", ""Andy's home"", ""Computer lab"", ""Contemporary time period"", ""Urban setting""]","[""Mount Everest (mentioned in passing)""]","[""Robotics"", ""Artificial intelligence"", ""Consequences of actions"", ""Responsibility"", ""Family relationships"", ""Children's literature"", ""Science fiction""]","[""Education"", ""Over-reliance on technology""]","[""Andy builds Bittu Bottu"", ""Bittu Bottu attends school in Andy's place"", ""Bittu Bottu malfunctions"", ""Andy retrieves Bittu Bottu's parts"", ""Andy's mother writes a letter to the teacher"", ""Bittu Bottu returns home""]","[""Andy's parents refuse to write the letter"", ""Andy sneaks into the school""]","[""Intelligence"", ""Curiosity"", ""Guilt"", ""Relief"", ""Responsibility"", ""Love for robot""]","[""Anger (teacher, parents)"", ""Fear (Andy)""]","[""Andy Prakash"", ""Bittu Bottu"", ""robot"", ""artificial intelligence"", ""school"", ""homework"", ""electronics"", ""diodes"", ""resistors"", ""capacitors"", ""transistors"", ""integrated circuits"", ""sensors"", ""actuators"", ""controller"", ""power supply"", ""solar powered"", ""rechargeable battery"", ""children's literature"", ""science fiction"", ""family"", ""responsibility""]"
+26391-goby-s-noisy-best-friend.txt,"[""Goby (fish)"", ""Snap (pistol shrimp)"", ""sea bass""]","[""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]","[""deep blue ocean"", ""ocean floor"", ""Snap's burrow""]","[""field"", ""tree tops""]","[""friendship"", ""differences"", ""acceptance"", ""animal relationships"", ""symbiosis"", ""survival"", ""underwater life""]","[""animal behavior"", ""cooperation"", ""warning signals""]","[""Goby and Snap's friendship"", ""Goby's encounter with the sea bass"", ""Snap saving Goby""]","[""Snap cleaning their burrow"", ""Goby swimming alone""]","[""friendship"", ""fear"", ""relief"", ""gratitude""]","[""wonder"", ""curiosity""]","[""Goby"", ""Snap"", ""pistol shrimp"", ""fish"", ""sea bass"", ""friendship"", ""ocean"", ""underwater"", ""animal friends"", ""symbiotic relationships"", ""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]" """
+
+try:
+    search_engine.load_data(csv_data=sample_csv_data)
+    logger.info("Sample data loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load sample data: {e}")
+
+# HTML Template
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Story Search Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loading { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div class="max-w-6xl mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <div class="flex items-center justify-center mb-4">
+                <svg class="w-12 h-12 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                </svg>
+                <h1 class="text-4xl font-bold text-gray-900">Story Search Engine</h1>
+            </div>
+            <p class="text-xl text-gray-600">Find the perfect story using AI-powered semantic search</p>
+            
+            <!-- API Status -->
+            <div id="api-status" class="inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4">
+                <div id="status-indicator" class="w-2 h-2 rounded-full mr-2"></div>
+                <span id="status-text">Checking API...</span>
+            </div>
+        </div>
+
+        <!-- Upload Section -->
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <h2 class="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                </svg>
+                Upload Story Data
+            </h2>
+            <form id="upload-form" class="flex items-center space-x-4">
+                <div class="flex-1">
+                    <input type="file" id="csv-file" accept=".csv" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                </div>
+                <button type="submit" id="upload-btn" disabled class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center">
+                    <svg id="upload-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <span id="upload-text">Upload CSV</span>
+                </button>
+            </form>
+        </div>
+
+        <!-- Search Section -->
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <form id="search-form" class="space-y-4">
+                <div class="flex items-center space-x-4">
+                    <div class="flex-1 relative">
+                        <svg class="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                        <input type="text" id="search-input" placeholder="Search for stories... (e.g., 'friendship underwater animals', 'robot school adventure')" class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg">
+                    </div>
+                    <button type="submit" id="search-btn" class="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center text-lg font-medium">
+                        <svg id="search-icon" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                        <span id="search-text">Search</span>
+                    </button>
+                </div>
+            </form>
+
+            <!-- Example Queries -->
+            <div class="mt-4">
+                <p class="text-sm text-gray-600 mb-2">Try these example searches:</p>
+                <div class="flex flex-wrap gap-2">
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="friendship underwater animals">friendship underwater animals</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="robot artificial intelligence school">robot artificial intelligence school</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="adventure jungle betrayal">adventure jungle betrayal</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="fear anxiety emotions">fear anxiety emotions</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="children magic fairy tale">children magic fairy tale</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Display -->
+        <div id="error-display" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center">
+            <svg class="w-5 h-5 text-red-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span id="error-text" class="text-red-700"></span>
+        </div>
+
+        <!-- Results Section -->
+        <div id="results-section" class="hidden space-y-6">
+            <h2 class="text-2xl font-semibold text-gray-900 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                </svg>
+                Search Results (<span id="results-count">0</span>)
+            </h2>
+            <div id="results-container"></div>
+        </div>
+
+        <!-- No Results -->
+        <div id="no-results" class="hidden text-center py-12">
+            <svg class="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+            </svg>
+            <h3 class="text-xl font-medium text-gray-900 mb-2">No stories found</h3>
+            <p class="text-gray-600">Try different keywords or upload more story data</p>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-16 text-center text-gray-500 text-sm">
+            <p>Story Search Engine powered by Sentence Transformers and Pinecone</p>
+        </footer>
+    </div>
+
+    <script>
+        // Global variables
+        let isSearching = false;
+        let isUploading = false;
+
+        // DOM elements
+        const searchForm = document.getElementById('search-form');
+        const searchInput = document.getElementById('search-input');
+        const searchBtn = document.getElementById('search-btn');
+        const searchIcon = document.getElementById('search-icon');
+        const searchText = document.getElementById('search-text');
+        const uploadForm = document.getElementById('upload-form');
+        const csvFileInput = document.getElementById('csv-file');
+        const uploadBtn = document.getElementById('upload-btn');
+        const uploadIcon = document.getElementById('upload-icon');
+        const uploadText = document.getElementById('upload-text');
+        const errorDisplay = document.getElementById('error-display');
+        const errorText = document.getElementById('error-text');
+        const resultsSection = document.getElementById('results-section');
+        const resultsContainer = document.getElementById('results-container');
+        const resultsCount = document.getElementById('results-count');
+        const noResults = document.getElementById('no-results');
+        const apiStatus = document.getElementById('api-status');
+        const statusIndicator = document.getElementById('status-indicator');
+        const statusText = document.getElementById('status-text');
+
+        // Helper functions
+        function showError(message) {
+            errorText.textContent = message;
+            errorDisplay.classList.remove('hidden');
+            setTimeout(() => {
+                errorDisplay.classList.add('hidden');
+            }, 5000);
+        }
+
+        function hideError() {
+            errorDisplay.classList.add('hidden');
+        }
+
+        function updateApiStatus(status) {
+            if (status.status === 'healthy') {
+                apiStatus.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4 bg-green-100 text-green-800';
+                statusIndicator.className = 'w-2 h-2 rounded-full mr-2 bg-green-400';
+                statusText.textContent = `API: ${status.status} | Stories: ${status.stories_loaded || 0} | Pinecone: ${status.pinecone_connected ? 'Connected' : 'Disconnected'}`;
+            } else {
+                apiStatus.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4 bg-red-100 text-red-800';
+                statusIndicator.className = 'w-2 h-2 rounded-full mr-2 bg-red-400';
+                statusText.textContent = `API: ${status.status || 'unhealthy'}`;
+            }
+        }
+
+        function getScoreColor(score) {
+            if (score >= 0.8) return 'text-green-600 bg-green-50';
+            if (score >= 0.6) return 'text-blue-600 bg-blue-50';
+            if (score >= 0.4) return 'text-yellow-600 bg-yellow-50';
+            return 'text-gray-600 bg-gray-50';
+        }
+
+        function formatFieldName(fieldName) {
+            return fieldName.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+        }
+
+        function getFieldIcon(fieldName) {
+            const icons = {
+                character_primary: '👥',
+                character_secondary: '👤',
+                setting_primary: '📍',
+                setting_secondary: '🗺️',
+                theme_primary: '⭐',
+                theme_secondary: '✨',
+                emotions_primary: '❤️',
+                emotions_secondary: '💭',
+                events_primary: '⚡',
+                events_secondary: '🔸',
+                keywords: '📚'
+            };
+            return icons[fieldName] || '📖';
+        }
+
+        function renderResults(results) {
+            if (!results || results.length === 0) {
+                resultsSection.classList.add('hidden');
+                noResults.classList.remove('hidden');
+                return;
+            }
+
+            noResults.classList.add('hidden');
+            resultsSection.classList.remove('hidden');
+            resultsCount.textContent = results.length;
+
+            resultsContainer.innerHTML = results.map((result, index) => {
+                const story = result.story;
+                const filename = story.filename || 'Unknown Story';
+                const title = filename.replace('.txt', '').replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                
+                // Create story details
+                const storyFields = Object.entries(story).filter(([key, value]) => 
+                    key !== 'id' && key !== 'filename' && Array.isArray(value) && value.length > 0
+                );
+
+                const fieldHtml = storyFields.map(([fieldName, fieldValues]) => {
+                    const icon = getFieldIcon(fieldName);
+                    const displayValues = fieldValues.slice(0, 3);
+                    const remainingCount = fieldValues.length - 3;
+                    
+                    return `
+                        <div class="bg-gray-50 rounded-lg p-3">
+                            <div class="flex items-center mb-2">
+                                <span class="mr-2">${icon}</span>
+                                <span class="text-sm font-medium text-gray-700">${formatFieldName(fieldName)}</span>
+                            </div>
+                            <div class="space-y-1">
+                                ${displayValues.map(value => 
+                                    `<span class="inline-block bg-white px-2 py-1 text-xs text-gray-600 rounded mr-1 mb-1">${value}</span>`
+                                ).join('')}
+                                ${remainingCount > 0 ? 
+                                    `<span class="inline-block bg-gray-200 px-2 py-1 text-xs text-gray-500 rounded">+${remainingCount} more</span>` : ''
+                                }
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Create field scores
+                const scoreHtml = result.matched_fields ? 
+                    Object.entries(result.matched_fields)
+                        .filter(([, score]) => score > 0)
+                        .sort(([, a], [, b]) => b - a)
+                        .map(([field, score]) => `
+                            <div class="px-2 py-1 rounded text-xs text-center ${getScoreColor(score)}">
+                                <div class="font-medium">${formatFieldName(field)}</div>
+                                <div>${(score * 100).toFixed(0)}%</div>
+                            </div>
+                        `).join('') : '';
+
+                return `
+                    <div class="bg-white rounded-xl shadow-lg overflow-hidden fade-in">
+                        <div class="p-6">
+                            <div class="flex items-start justify-between mb-4">
+                                <div class="flex-1">
+                                    <h3 class="text-xl font-bold text-gray-900 mb-2">${title}</h3>
+                                    <div class="flex items-center space-x-4 text-sm text-gray-500">
+                                        <span>ID: ${story.id || 'N/A'}</span>
+                                        <span class="px-2 py-1 rounded-full text-xs font-medium ${getScoreColor(result.score || 0)}">
+                                            Match Score: ${((result.score || 0) * 100).toFixed(1)}%
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+                                ${fieldHtml}
+                            </div>
+                            
+                            ${scoreHtml ? `
+                                <div class="border-t pt-4">
+                                    <h4 class="text-sm font-medium text-gray-700 mb-2">Field Match Scores</h4>
+                                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                                        ${scoreHtml}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // API functions
+        async function checkHealth() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                updateApiStatus(data);
+            } catch (error) {
+                updateApiStatus({ status: 'unhealthy', error: error.message });
+            }
+        }
+
+        async function performSearch(query) {
+            if (isSearching) return;
+            
+            isSearching = true;
+            searchBtn.disabled = true;
+            searchIcon.classList.add('loading');
+            searchText.textContent = 'Searching...';
+            hideError();
+
+            try {
+                const response = await fetch('/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query.trim(),
+                        top_k: 10
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Search failed: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                renderResults(data.results || []);
+                
+            } catch (error) {
+                showError(error.message);
+                renderResults([]);
+            } finally {
+                isSearching = false;
+                searchBtn.disabled = false;
+                searchIcon.classList.remove('loading');
+                searchText.textContent = 'Search';
+            }
+        }
+
+        async function uploadFile(file) {
+            if (isUploading) return;
+            
+            isUploading = true;
+            uploadBtn.disabled = true;
+            uploadIcon.classList.add('loading');
+            uploadText.textContent = 'Uploading...';
+            hideError();
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Upload failed: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                alert(`Success! ${data.stories_loaded} stories loaded.`);
+                csvFileInput.value = '';
+                checkHealth(); // Refresh health status
+                
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                isUploading = false;
+                uploadBtn.disabled = !csvFileInput.files[0];
+                uploadIcon.classList.remove('loading');
+                uploadText.textContent = 'Upload CSV';
+            }
+        }
+
+        // Event listeners
+        searchForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const query = searchInput.value.trim();
+            if (query) {
+                performSearch(query);
+            }
+        });
+
+        uploadForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const file = csvFileInput.files[0];
+            if (file) {
+                uploadFile(file);
+            }
+        });
+
+        csvFileInput.addEventListener('change', (e) => {
+            uploadBtn.disabled = !e.target.files[0];
+        });
+
+        // Example query buttons
+        document.querySelectorAll('.example-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const query = btn.getAttribute('data-query');
+                searchInput.value = query;
+                performSearch(query);
+            });
+        });
+
+        // Initialize
+        checkHealth();
+    </script>
+</body>
+</html>
+"""
+
+# Flask routes
+@app.route('/')
+def home():
+    """Serve the main HTML page"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'pinecone_connected': search_engine.index is not None,
+        'stories_loaded': len(search_engine.stories)
+    })
+
+@app.route('/search', methods=['POST'])
+def search_stories():
+    """Search stories endpoint"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'query' not in data:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        query = data['query'].strip()
+        top_k = data.get('top_k', 10)
+        
+        if not query:
+            return jsonify({'error': 'Query cannot be empty'}), 400
+        
+        # Perform search
+        results = search_engine.search(query, top_k)
+        
+        # Convert results to JSON-serializable format
+        response_data = []
+        for result in results:
+            # Convert numpy types to Python native types
+            story_dict = asdict(result.story)
+            score = float(result.score) if result.score is not None else 0.0
+            matched_fields = {
+                field: float(score) if score is not None else 0.0 
+                for field, score in result.matched_fields.items()
+            }
+            
+            response_data.append({
+                'story': story_dict,
+                'score': score,
+                'matched_fields': matched_fields
+            })
+        
+        return jsonify({
+            'query': query,
+            'results': response_data,
+            'total_found': len(response_data)
+        })
+        
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/upload', methods=['POST'])
+def upload_data():
+    """Upload new CSV data"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not file.filename.endswith('.csv'):
+            return jsonify({'error': 'File must be a CSV'}), 400
+        
+        # Read file content
+        csv_content = file.read().decode('utf-8')
+        
+        # Load new data
+        search_engine.load_data(csv_data=csv_content)
+        
+        return jsonify({
+            'message': 'Data uploaded successfully',
+            'stories_loaded': len(search_engine.stories)
+        })
+        
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({'error': 'Failed to upload data'}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
