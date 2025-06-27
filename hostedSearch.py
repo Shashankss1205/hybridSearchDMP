@@ -360,7 +360,8 @@ class StorySearchEngine:
                 raise ValueError("Either csv_path or csv_data must be provided")
             
             logger.info(f"Loaded {len(df)} stories from CSV")
-            
+            df = df[~df.isin(['Error parsing']).any(axis=1)]
+
             # Convert to Story objects
             for idx, row in df.iterrows():
                 story_id = row['filename'].replace('.txt', '')
