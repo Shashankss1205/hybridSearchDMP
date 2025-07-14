@@ -47,7 +47,7 @@ class VoiceHandler:
     
     def __init__(self):
         self.gemini_api_key = os.getenv('GOOGLE_API_KEY')
-        self.model_name = os.getenv('GEMINI_MODEL', 'gemini-flash-2.5')
+        self.model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
         
         if self.gemini_api_key:
             genai.configure(api_key=self.gemini_api_key)
