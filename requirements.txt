@@ -11,3 +11,4 @@ scikit-learn
 requests
 SpeechRecognition  
 google-generativeai
+pydub
