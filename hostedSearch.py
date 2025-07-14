@@ -8,7 +8,7 @@ import requests
 from pinecone import Pinecone, ServerlessSpec
 from fuzzywuzzy import fuzz
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import ast
 from dataclasses import dataclass, asdict
 import logging
@@ -17,10 +17,12 @@ import io
 import time
 import google.generativeai as genai
 import speech_recognition as sr
-# import pyttsx3
 from werkzeug.utils import secure_filename
 from pydub import AudioSegment
 import tempfile
+import pickle
+
+
 
 # Load environment variables
 load_dotenv()
@@ -309,10 +311,18 @@ class StorySearchEngine:
         self.pc = None
         self.index = None
         self.stories = {}
+        self.stories_backup_file = "stories_backup.pkl"
         
         # Initialize Pinecone
         self._init_pinecone()
         
+        # Try to load existing stories from backup
+        self._load_stories_backup()
+        
+        # If no stories loaded and Pinecone is available, try to sync from Pinecone
+        if not self.stories and self.index:
+            self._sync_from_pinecone()
+
         # Field weights for scoring
         self.weights = {
             'theme_primary': 0.25,
@@ -394,6 +404,118 @@ class StorySearchEngine:
             self.pc = None
             self.index = None
     
+    def _save_stories_backup(self):
+        """Save stories to disk for persistence"""
+        try:
+            with open(self.stories_backup_file, 'wb') as f:
+                pickle.dump(self.stories, f)
+            logger.info(f"Saved {len(self.stories)} stories to backup file")
+        except Exception as e:
+            logger.error(f"Failed to save stories backup: {e}")
+    
+    def _load_stories_backup(self):
+        """Load stories from disk backup"""
+        try:
+            if os.path.exists(self.stories_backup_file):
+                with open(self.stories_backup_file, 'rb') as f:
+                    self.stories = pickle.load(f)
+                logger.info(f"Loaded {len(self.stories)} stories from backup file")
+            else:
+                logger.info("No backup file found")
+        except Exception as e:
+            logger.error(f"Failed to load stories backup: {e}")
+            self.stories = {}
+    
+    def _sync_from_pinecone(self):
+        """Rebuild stories dict from Pinecone metadata"""
+        if not self.index:
+            logger.warning("Cannot sync from Pinecone - index not available")
+            return
+        
+        try:
+            logger.info("Attempting to sync stories from Pinecone metadata...")
+            
+            # Get index stats first
+            stats = self.index.describe_index_stats()
+            total_vectors = stats.get('total_vector_count', 0)
+            logger.info(f"Found {total_vectors} vectors in Pinecone index")
+            
+            if total_vectors == 0:
+                logger.info("No vectors found in Pinecone index")
+                return
+            
+            # Query with a dummy vector to get all results
+            dummy_vector = [0.0] * self.model.dimension
+            
+            # Fetch results in batches
+            all_matches = []
+            top_k = min(10000, total_vectors)  # Pinecone limit
+            
+            query_result = self.index.query(
+                vector=dummy_vector,
+                top_k=top_k,
+                include_metadata=True
+            )
+            
+            all_matches.extend(query_result.get('matches', []))
+            
+            # Group by story_id to rebuild Story objects
+            story_data = {}
+            for match in all_matches:
+                metadata = match.get('metadata', {})
+                story_id = metadata.get('story_id')
+                
+                if not story_id:
+                    continue
+                
+                if story_id not in story_data:
+                    story_data[story_id] = {
+                        'id': story_id,
+                        'filename': metadata.get('filename', f"{story_id}.txt"),
+                        'fields': {}
+                    }
+                
+                field = metadata.get('field')
+                text = metadata.get('text', '')
+                
+                if field and text:
+                    # Convert text back to list (approximate)
+                    field_values = [item.strip() for item in text.split(' ') if item.strip()]
+                    story_data[story_id]['fields'][field] = field_values
+            
+            # Convert to Story objects
+            synced_stories = {}
+            for story_id, data in story_data.items():
+                try:
+                    story = Story(
+                        id=story_id,
+                        filename=data['filename'],
+                        character_primary=data['fields'].get('character_primary', []),
+                        character_secondary=data['fields'].get('character_secondary', []),
+                        setting_primary=data['fields'].get('setting_primary', []),
+                        setting_secondary=data['fields'].get('setting_secondary', []),
+                        theme_primary=data['fields'].get('theme_primary', []),
+                        theme_secondary=data['fields'].get('theme_secondary', []),
+                        events_primary=data['fields'].get('events_primary', []),
+                        events_secondary=data['fields'].get('events_secondary', []),
+                        emotions_primary=data['fields'].get('emotions_primary', []),
+                        emotions_secondary=data['fields'].get('emotions_secondary', []),
+                        keywords=data['fields'].get('keywords', [])
+                    )
+                    synced_stories[story_id] = story
+                except Exception as e:
+                    logger.warning(f"Failed to create story object for {story_id}: {e}")
+            
+            if synced_stories:
+                self.stories = synced_stories
+                self._save_stories_backup()  # Save the synced data
+                logger.info(f"Successfully synced {len(self.stories)} stories from Pinecone")
+            else:
+                logger.warning("No valid stories could be synced from Pinecone")
+                
+        except Exception as e:
+            logger.error(f"Failed to sync from Pinecone: {e}")
+    
     def _safe_eval_list(self, list_str: str) -> List[str]:
         """Safely evaluate string representation of list"""
         if pd.isna(list_str) or not list_str.strip():
@@ -430,6 +552,7 @@ class StorySearchEngine:
             logger.info(f"Loaded {len(df)} stories from CSV")
             
             # Convert to Story objects
+            new_stories = {}
             for idx, row in df.iterrows():
                 story_id = row['filename'].replace('.txt', '')
                 
@@ -449,24 +572,32 @@ class StorySearchEngine:
                     keywords=self._safe_eval_list(row['keywords'])
                 )
                 
-                self.stories[story_id] = story
+                new_stories[story_id] = story
+            
+            # Update stories (don't replace, add to existing)
+            self.stories.update(new_stories)
+            logger.info(f"Total stories now: {len(self.stories)}")
             
             logger.info(f"Processed {len(self.stories)} stories")
-            
+            # Save backup
+            self._save_stories_backup()
+
             # Create embeddings and upsert to Pinecone
             if self.index:
-                self._create_embeddings()
+                self._create_embeddings(new_stories)
             
         except Exception as e:
             logger.error(f"Failed to load data: {e}")
             raise
     
-    def _create_embeddings(self):
+    def _create_embeddings(self, stories_to_process: Dict[str, Story] = None):
         """Create embeddings for semantic fields and upsert to Pinecone"""
         try:
+            if stories_to_process is None:
+                stories_to_process = self.stories
             vectors_to_upsert = []
             
-            for story_id, story in self.stories.items():
+            for story_id, story in stories_to_process.items():
                 # Create combined text for each semantic field
                 for field in self.semantic_fields:
                     field_values = getattr(story, field)
@@ -578,6 +709,10 @@ class StorySearchEngine:
         if not query.strip():
             return []
         
+        if not self.stories:
+            logger.warning("No stories loaded in memory")
+            return []
+        
         results = {}
         
         # 1. Semantic search using Pinecone (if available) or local embeddings
@@ -585,10 +720,10 @@ class StorySearchEngine:
             try:
                 query_embedding = self.model.encode([query]).tolist()[0]
                 
-                # Search in Pinecone
+                # Search in Pinecone with higher top_k to get more results
                 search_results = self.index.query(
                     vector=query_embedding,
-                    top_k=top_k * len(self.semantic_fields),
+                    top_k=min(1000, top_k * len(self.semantic_fields)),  # Get more results,
                     include_metadata=True
                 )
                 
@@ -598,15 +733,17 @@ class StorySearchEngine:
                     field = match['metadata']['field']
                     score = match['score']
                     
-                    if story_id not in results:
-                        results[story_id] = {
-                            'story': self.stories[story_id],
-                            'scores': {},
-                            'total_score': 0.0
-                        }
-                    
-                    results[story_id]['scores'][field] = float(match['score'])
-                    results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
+                    # Only include if story exists in local memory
+                    if story_id in self.stories:
+                        if story_id not in results:
+                            results[story_id] = {
+                                'story': self.stories[story_id],
+                                'scores': {},
+                                'total_score': 0.0
+                            }
+                        
+                        results[story_id]['scores'][field] = float(match['score'])
+                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
                 
             except Exception as e:
                 logger.error(f"Pinecone search failed: {e}")
@@ -658,6 +795,15 @@ class StorySearchEngine:
         search_results.sort(key=lambda x: x.score, reverse=True)
         
         return search_results[:top_k]
+    
+    def get_stats(self):
+        """Get current statistics"""
+        return {
+            'total_stories': len(self.stories),
+            'pinecone_connected': self.index is not None,
+            'embedding_provider': self.model.provider,
+            'embedding_dimension': self.model.dimension
+        }
 
 # Initialize search engine
 search_engine = StorySearchEngine()
@@ -666,10 +812,6 @@ search_engine = StorySearchEngine()
 voice_handler = VoiceHandler()
 
 
-# Load sample data on startup
-sample_csv_data = """filename,character_primary,character_secondary,setting_primary,setting_secondary,theme_primary,theme_secondary,events_primary,events_secondary,emotions_primary,emotions_secondary,keywords
-114184-how-bittu-bottu-got-better.txt,"[""Andy Prakash"", ""Bittu Bottu"", ""boy"", ""robot""]","[""Class teacher"", ""Amma (mother)"", ""Pa (father)"", ""Security Anna""]","[""School"", ""Andy's home"", ""Computer lab"", ""Contemporary time period"", ""Urban setting""]","[""Mount Everest (mentioned in passing)""]","[""Robotics"", ""Artificial intelligence"", ""Consequences of actions"", ""Responsibility"", ""Family relationships"", ""Children's literature"", ""Science fiction""]","[""Education"", ""Over-reliance on technology""]","[""Andy builds Bittu Bottu"", ""Bittu Bottu attends school in Andy's place"", ""Bittu Bottu malfunctions"", ""Andy retrieves Bittu Bottu's parts"", ""Andy's mother writes a letter to the teacher"", ""Bittu Bottu returns home""]","[""Andy's parents refuse to write the letter"", ""Andy sneaks into the school""]","[""Intelligence"", ""Curiosity"", ""Guilt"", ""Relief"", ""Responsibility"", ""Love for robot""]","[""Anger (teacher, parents)"", ""Fear (Andy)""]","[""Andy Prakash"", ""Bittu Bottu"", ""robot"", ""artificial intelligence"", ""school"", ""homework"", ""electronics"", ""diodes"", ""resistors"", ""capacitors"", ""transistors"", ""integrated circuits"", ""sensors"", ""actuators"", ""controller"", ""power supply"", ""solar powered"", ""rechargeable battery"", ""children's literature"", ""science fiction"", ""family"", ""responsibility""]"
-26391-goby-s-noisy-best-friend.txt,"[""Goby (fish)"", ""Snap (pistol shrimp)"", ""sea bass""]","[""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]","[""deep blue ocean"", ""ocean floor"", ""Snap's burrow""]","[""field"", ""tree tops""]","[""friendship"", ""differences"", ""acceptance"", ""animal relationships"", ""symbiosis"", ""survival"", ""underwater life""]","[""animal behavior"", ""cooperation"", ""warning signals""]","[""Goby and Snap's friendship"", ""Goby's encounter with the sea bass"", ""Snap saving Goby""]","[""Snap cleaning their burrow"", ""Goby swimming alone""]","[""friendship"", ""fear"", ""relief"", ""gratitude""]","[""wonder"", ""curiosity""]","[""Goby"", ""Snap"", ""pistol shrimp"", ""fish"", ""sea bass"", ""friendship"", ""ocean"", ""underwater"", ""animal friends"", ""symbiotic relationships"", ""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]" """
 
 try:
     search_engine.load_data(csv_data=sample_csv_data)
@@ -731,6 +873,17 @@ HTML_TEMPLATE = """
                     <span id="upload-text">Upload CSV</span>
                 </button>
             </form>
+
+            <!-- Sync from Pinecone Button -->
+            <div class="mt-4 pt-4 border-t border-gray-200">
+                <button id="sync-btn" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center text-sm">
+                    <svg id="sync-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span id="sync-text">Sync from Pinecone</span>
+                </button>
+                <p class="text-xs text-gray-500 mt-1">Load stories from existing Pinecone vectors if available</p>
+            </div>
         </div>
 
         <!-- CSV Schema Documentation -->
@@ -856,7 +1009,7 @@ HTML_TEMPLATE = """
         // Global variables
         let isSearching = false;
         let isUploading = false;
-
+        let isSyncing = false;
         // DOM elements
         const searchForm = document.getElementById('search-form');
         const searchInput = document.getElementById('search-input');
@@ -868,6 +1021,9 @@ HTML_TEMPLATE = """
         const uploadBtn = document.getElementById('upload-btn');
         const uploadIcon = document.getElementById('upload-icon');
         const uploadText = document.getElementById('upload-text');
+        const syncBtn = document.getElementById('sync-btn');
+        const syncIcon = document.getElementById('sync-icon');
+        const syncText = document.getElementById('sync-text');
         const errorDisplay = document.getElementById('error-display');
         const errorText = document.getElementById('error-text');
         const resultsSection = document.getElementById('results-section');
@@ -1107,6 +1263,39 @@ HTML_TEMPLATE = """
             }
         }
 
+        
+        async function syncFromPinecone() {
+            if (isSyncing) return;
+            
+            isSyncing = true;
+            syncBtn.disabled = true;
+            syncIcon.classList.add('loading');
+            syncText.textContent = 'Syncing...';
+            hideError();
+
+            try {
+                const response = await fetch('/sync', {
+                    method: 'POST',
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Sync failed: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                alert(`Success! ${data.stories_synced} stories synced from Pinecone.`);
+                checkHealth(); // Refresh health status
+                
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                isSyncing = false;
+                syncBtn.disabled = false;
+                syncIcon.classList.remove('loading');
+                syncText.textContent = 'Sync from Pinecone';
+            }
+        }
+
         // Event listeners
         searchForm.addEventListener('submit', (e) => {
             e.preventDefault();
@@ -1122,6 +1311,10 @@ HTML_TEMPLATE = """
             if (file) {
                 uploadFile(file);
             }
+        });
+
+        syncBtn.addEventListener('click', () => {
+            syncFromPinecone();
         });
 
         csvFileInput.addEventListener('change', (e) => {
@@ -1282,10 +1475,13 @@ def home():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    stats = search_engine.get_stats()
     return jsonify({
         'status': 'healthy',
-        'pinecone_connected': search_engine.index is not None,
-        'stories_loaded': len(search_engine.stories)
+        'pinecone_connected': stats['pinecone_connected'],
+        'stories_loaded': stats['total_stories'],
+        'embedding_provider': stats['embedding_provider'],
+        'embedding_dimension': stats['embedding_dimension']
     })
 
 @app.route('/search', methods=['POST'])
@@ -1427,62 +1623,27 @@ def voice_search():
     except Exception as e:
         logger.error(f"Voice search error: {e}")
         return jsonify({'error': 'Voice search failed'}), 500
-# def voice_search():
-#     """Handle voice search"""
-#     try:
-#         if 'audio' not in request.files:
-#             return jsonify({'error': 'No audio file provided'}), 400
+
+@app.route('/sync', methods=['POST'])
+def sync_from_pinecone():
+    """Sync stories from Pinecone"""
+    try:
+        if not search_engine.index:
+            return jsonify({'error': 'Pinecone not connected'}), 400
         
-#         audio_file = request.files['audio']
-#         if audio_file.filename == '':
-#             return jsonify({'error': 'No audio file selected'}), 400
+        stories_before = len(search_engine.stories)
+        search_engine._sync_from_pinecone()
+        stories_after = len(search_engine.stories)
         
-#         # Save temporary audio file
-#         filename = secure_filename(audio_file.filename)
-#         temp_path = f"temp_{filename}"
-#         audio_file.save(temp_path)
+        return jsonify({
+            'message': 'Sync completed successfully',
+            'stories_synced': stories_after - stories_before,
+            'total_stories': stories_after
+        })
         
-#         try:
-#             # Convert speech to text
-#             voice_query = voice_handler.speech_to_text(temp_path)
-            
-#             # Enhance query with Gemini
-#             enhanced_query = voice_handler.enhance_query_with_gemini(voice_query)
-            
-#             # Perform search
-#             results = search_engine.search(enhanced_query, 10)
-            
-#             # Convert results to JSON-serializable format
-#             response_data = []
-#             for result in results:
-#                 story_dict = asdict(result.story)
-#                 score = float(result.score) if result.score is not None else 0.0
-#                 matched_fields = {
-#                     field: float(score) if score is not None else 0.0 
-#                     for field, score in result.matched_fields.items()
-#                 }
-                
-#                 response_data.append({
-#                     'story': story_dict,
-#                     'score': score,
-#                     'matched_fields': matched_fields
-#                 })
-            
-#             return jsonify({
-#                 'original_query': voice_query,
-#                 'enhanced_query': enhanced_query,
-#                 'results': response_data,
-#                 'total_found': len(response_data)
-#             })
-            
-#         finally:
-#             # Clean up temporary file
-#             if os.path.exists(temp_path):
-#                 os.remove(temp_path)
-                
-#     except Exception as e:
-#         logger.error(f"Voice search error: {e}")
-#         return jsonify({'error': 'Voice search failed'}), 500
+    except Exception as e:
+        logger.error(f"Sync error: {e}")
+        return jsonify({'error': 'Failed to sync from Pinecone'}), 500
 
 @app.route('/delete-stories', methods=['POST'])
 def delete_stories():
