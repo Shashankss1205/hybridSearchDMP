@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: hybrid-search
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    build:
+      buildCommand: pip install -r requirements.txt
+    buildpacks:
+      - https://github.com/render-examples/apt
+      - heroku/python
