@@ -17,7 +17,7 @@ import io
 import time
 import google.generativeai as genai
 import speech_recognition as sr
-import pyttsx3
+# import pyttsx3
 from werkzeug.utils import secure_filename
 from pydub import AudioSegment
 import tempfile
@@ -88,17 +88,17 @@ class VoiceHandler:
             logger.error(f"Gemini enhancement error: {e}")
             return voice_query
     
-    def text_to_speech(self, text: str) -> str:
-        """Convert text to speech and return audio file path"""
-        try:
-            engine = pyttsx3.init()
-            audio_file = f"temp_audio_{int(time.time())}.wav"
-            engine.save_to_file(text, audio_file)
-            engine.runAndWait()
-            return audio_file
-        except Exception as e:
-            logger.error(f"Text to speech error: {e}")
-            raise
+    # def text_to_speech(self, text: str) -> str:
+    #     """Convert text to speech and return audio file path"""
+    #     try:
+    #         engine = pyttsx3.init()
+    #         audio_file = f"temp_audio_{int(time.time())}.wav"
+    #         engine.save_to_file(text, audio_file)
+    #         engine.runAndWait()
+    #         return audio_file
+    #     except Exception as e:
+    #         logger.error(f"Text to speech error: {e}")
+    #         raise
 
 app = Flask(__name__)
 CORS(app)
