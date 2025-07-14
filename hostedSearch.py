@@ -8,14 +8,19 @@ import requests
 from pinecone import Pinecone, ServerlessSpec
 from fuzzywuzzy import fuzz
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import ast
 from dataclasses import dataclass, asdict
 import logging
 from dotenv import load_dotenv
 import io
 import time
-import pickle
+import google.generativeai as genai
+import speech_recognition as sr
+import pyttsx3
+from werkzeug.utils import secure_filename
+from pydub import AudioSegment
+import tempfile
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +39,66 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
+
+class VoiceHandler:
+    """Handle voice input/output using Gemini"""
+    
+    def __init__(self):
+        self.gemini_api_key = os.getenv('GOOGLE_API_KEY')
+        self.model_name = os.getenv('GEMINI_MODEL', 'gemini-flash-2.5')
+        
+        if self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+            self.model = genai.GenerativeModel(self.model_name)
+            logger.info("Gemini voice handler initialized")
+        else:
+            logger.warning("No Gemini API key found - voice features disabled")
+            self.model = None
+    
+    def speech_to_text(self, audio_file) -> str:
+        """Convert speech to text"""
+        try:
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_file) as source:
+                audio = r.record(source)
+            return r.recognize_google(audio)
+        except Exception as e:
+            logger.error(f"Speech recognition error: {e}")
+            raise
+    
+    def enhance_query_with_gemini(self, voice_query: str) -> str:
+        """Use Gemini to enhance voice query for better search"""
+        if not self.model:
+            return voice_query
+            
+        try:
+            prompt = f"""
+            Convert this voice query into a better search query for a story search engine.
+            Focus on extracting themes, emotions, characters, settings, and events.
+            
+            Voice query: "{voice_query}"
+            
+            Return only the improved search query, nothing else.
+            """
+            
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+            
+        except Exception as e:
+            logger.error(f"Gemini enhancement error: {e}")
+            return voice_query
+    
+    def text_to_speech(self, text: str) -> str:
+        """Convert text to speech and return audio file path"""
+        try:
+            engine = pyttsx3.init()
+            audio_file = f"temp_audio_{int(time.time())}.wav"
+            engine.save_to_file(text, audio_file)
+            engine.runAndWait()
+            return audio_file
+        except Exception as e:
+            logger.error(f"Text to speech error: {e}")
+            raise
 
 app = Flask(__name__)
 CORS(app)
@@ -244,17 +309,9 @@ class StorySearchEngine:
         self.pc = None
         self.index = None
         self.stories = {}
-        self.stories_backup_file = "stories_backup.pkl"
         
         # Initialize Pinecone
         self._init_pinecone()
-        
-        # Try to load existing stories from backup
-        self._load_stories_backup()
-        
-        # If no stories loaded and Pinecone is available, try to sync from Pinecone
-        if not self.stories and self.index:
-            self._sync_from_pinecone()
         
         # Field weights for scoring
         self.weights = {
@@ -337,118 +394,6 @@ class StorySearchEngine:
             self.pc = None
             self.index = None
     
-    def _save_stories_backup(self):
-        """Save stories to disk for persistence"""
-        try:
-            with open(self.stories_backup_file, 'wb') as f:
-                pickle.dump(self.stories, f)
-            logger.info(f"Saved {len(self.stories)} stories to backup file")
-        except Exception as e:
-            logger.error(f"Failed to save stories backup: {e}")
-    
-    def _load_stories_backup(self):
-        """Load stories from disk backup"""
-        try:
-            if os.path.exists(self.stories_backup_file):
-                with open(self.stories_backup_file, 'rb') as f:
-                    self.stories = pickle.load(f)
-                logger.info(f"Loaded {len(self.stories)} stories from backup file")
-            else:
-                logger.info("No backup file found")
-        except Exception as e:
-            logger.error(f"Failed to load stories backup: {e}")
-            self.stories = {}
-    
-    def _sync_from_pinecone(self):
-        """Rebuild stories dict from Pinecone metadata"""
-        if not self.index:
-            logger.warning("Cannot sync from Pinecone - index not available")
-            return
-        
-        try:
-            logger.info("Attempting to sync stories from Pinecone metadata...")
-            
-            # Get index stats first
-            stats = self.index.describe_index_stats()
-            total_vectors = stats.get('total_vector_count', 0)
-            logger.info(f"Found {total_vectors} vectors in Pinecone index")
-            
-            if total_vectors == 0:
-                logger.info("No vectors found in Pinecone index")
-                return
-            
-            # Query with a dummy vector to get all results
-            dummy_vector = [0.0] * self.model.dimension
-            
-            # Fetch results in batches
-            all_matches = []
-            top_k = min(10000, total_vectors)  # Pinecone limit
-            
-            query_result = self.index.query(
-                vector=dummy_vector,
-                top_k=top_k,
-                include_metadata=True
-            )
-            
-            all_matches.extend(query_result.get('matches', []))
-            
-            # Group by story_id to rebuild Story objects
-            story_data = {}
-            for match in all_matches:
-                metadata = match.get('metadata', {})
-                story_id = metadata.get('story_id')
-                
-                if not story_id:
-                    continue
-                
-                if story_id not in story_data:
-                    story_data[story_id] = {
-                        'id': story_id,
-                        'filename': metadata.get('filename', f"{story_id}.txt"),
-                        'fields': {}
-                    }
-                
-                field = metadata.get('field')
-                text = metadata.get('text', '')
-                
-                if field and text:
-                    # Convert text back to list (approximate)
-                    field_values = [item.strip() for item in text.split(' ') if item.strip()]
-                    story_data[story_id]['fields'][field] = field_values
-            
-            # Convert to Story objects
-            synced_stories = {}
-            for story_id, data in story_data.items():
-                try:
-                    story = Story(
-                        id=story_id,
-                        filename=data['filename'],
-                        character_primary=data['fields'].get('character_primary', []),
-                        character_secondary=data['fields'].get('character_secondary', []),
-                        setting_primary=data['fields'].get('setting_primary', []),
-                        setting_secondary=data['fields'].get('setting_secondary', []),
-                        theme_primary=data['fields'].get('theme_primary', []),
-                        theme_secondary=data['fields'].get('theme_secondary', []),
-                        events_primary=data['fields'].get('events_primary', []),
-                        events_secondary=data['fields'].get('events_secondary', []),
-                        emotions_primary=data['fields'].get('emotions_primary', []),
-                        emotions_secondary=data['fields'].get('emotions_secondary', []),
-                        keywords=data['fields'].get('keywords', [])
-                    )
-                    synced_stories[story_id] = story
-                except Exception as e:
-                    logger.warning(f"Failed to create story object for {story_id}: {e}")
-            
-            if synced_stories:
-                self.stories = synced_stories
-                self._save_stories_backup()  # Save the synced data
-                logger.info(f"Successfully synced {len(self.stories)} stories from Pinecone")
-            else:
-                logger.warning("No valid stories could be synced from Pinecone")
-                
-        except Exception as e:
-            logger.error(f"Failed to sync from Pinecone: {e}")
-    
     def _safe_eval_list(self, list_str: str) -> List[str]:
         """Safely evaluate string representation of list"""
         if pd.isna(list_str) or not list_str.strip():
@@ -477,14 +422,14 @@ class StorySearchEngine:
                 df = pd.read_csv(io.StringIO(csv_data))
             elif csv_path:
                 df = pd.read_csv(csv_path)
+                df = df[~df.isin(['Error parsing','Error']).any(axis=1)]
+
             else:
                 raise ValueError("Either csv_path or csv_data must be provided")
             
             logger.info(f"Loaded {len(df)} stories from CSV")
-            df = df[~df.isin(['Error parsing']).any(axis=1)]
-
+            
             # Convert to Story objects
-            new_stories = {}
             for idx, row in df.iterrows():
                 story_id = row['filename'].replace('.txt', '')
                 
@@ -504,32 +449,24 @@ class StorySearchEngine:
                     keywords=self._safe_eval_list(row['keywords'])
                 )
                 
-                new_stories[story_id] = story
+                self.stories[story_id] = story
             
-            # Update stories (don't replace, add to existing)
-            self.stories.update(new_stories)
-            logger.info(f"Total stories now: {len(self.stories)}")
-            
-            # Save backup
-            self._save_stories_backup()
+            logger.info(f"Processed {len(self.stories)} stories")
             
             # Create embeddings and upsert to Pinecone
             if self.index:
-                self._create_embeddings(new_stories)
+                self._create_embeddings()
             
         except Exception as e:
             logger.error(f"Failed to load data: {e}")
             raise
     
-    def _create_embeddings(self, stories_to_process: Dict[str, Story] = None):
+    def _create_embeddings(self):
         """Create embeddings for semantic fields and upsert to Pinecone"""
         try:
-            if stories_to_process is None:
-                stories_to_process = self.stories
-            
             vectors_to_upsert = []
             
-            for story_id, story in stories_to_process.items():
+            for story_id, story in self.stories.items():
                 # Create combined text for each semantic field
                 for field in self.semantic_fields:
                     field_values = getattr(story, field)
@@ -641,10 +578,6 @@ class StorySearchEngine:
         if not query.strip():
             return []
         
-        if not self.stories:
-            logger.warning("No stories loaded in memory")
-            return []
-        
         results = {}
         
         # 1. Semantic search using Pinecone (if available) or local embeddings
@@ -652,10 +585,10 @@ class StorySearchEngine:
             try:
                 query_embedding = self.model.encode([query]).tolist()[0]
                 
-                # Search in Pinecone with higher top_k to get more results
+                # Search in Pinecone
                 search_results = self.index.query(
                     vector=query_embedding,
-                    top_k=min(1000, top_k * len(self.semantic_fields)),  # Get more results
+                    top_k=top_k * len(self.semantic_fields),
                     include_metadata=True
                 )
                 
@@ -665,17 +598,15 @@ class StorySearchEngine:
                     field = match['metadata']['field']
                     score = match['score']
                     
-                    # Only include if story exists in local memory
-                    if story_id in self.stories:
-                        if story_id not in results:
-                            results[story_id] = {
-                                'story': self.stories[story_id],
-                                'scores': {},
-                                'total_score': 0.0
-                            }
-                        
-                        results[story_id]['scores'][field] = float(match['score'])
-                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
+                    if story_id not in results:
+                        results[story_id] = {
+                            'story': self.stories[story_id],
+                            'scores': {},
+                            'total_score': 0.0
+                        }
+                    
+                    results[story_id]['scores'][field] = float(match['score'])
+                    results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
                 
             except Exception as e:
                 logger.error(f"Pinecone search failed: {e}")
@@ -727,18 +658,24 @@ class StorySearchEngine:
         search_results.sort(key=lambda x: x.score, reverse=True)
         
         return search_results[:top_k]
-    
-    def get_stats(self):
-        """Get current statistics"""
-        return {
-            'total_stories': len(self.stories),
-            'pinecone_connected': self.index is not None,
-            'embedding_provider': self.model.provider,
-            'embedding_dimension': self.model.dimension
-        }
 
 # Initialize search engine
 search_engine = StorySearchEngine()
+
+# Initialize voice handler
+voice_handler = VoiceHandler()
+
+
+# Load sample data on startup
+sample_csv_data = """filename,character_primary,character_secondary,setting_primary,setting_secondary,theme_primary,theme_secondary,events_primary,events_secondary,emotions_primary,emotions_secondary,keywords
+114184-how-bittu-bottu-got-better.txt,"[""Andy Prakash"", ""Bittu Bottu"", ""boy"", ""robot""]","[""Class teacher"", ""Amma (mother)"", ""Pa (father)"", ""Security Anna""]","[""School"", ""Andy's home"", ""Computer lab"", ""Contemporary time period"", ""Urban setting""]","[""Mount Everest (mentioned in passing)""]","[""Robotics"", ""Artificial intelligence"", ""Consequences of actions"", ""Responsibility"", ""Family relationships"", ""Children's literature"", ""Science fiction""]","[""Education"", ""Over-reliance on technology""]","[""Andy builds Bittu Bottu"", ""Bittu Bottu attends school in Andy's place"", ""Bittu Bottu malfunctions"", ""Andy retrieves Bittu Bottu's parts"", ""Andy's mother writes a letter to the teacher"", ""Bittu Bottu returns home""]","[""Andy's parents refuse to write the letter"", ""Andy sneaks into the school""]","[""Intelligence"", ""Curiosity"", ""Guilt"", ""Relief"", ""Responsibility"", ""Love for robot""]","[""Anger (teacher, parents)"", ""Fear (Andy)""]","[""Andy Prakash"", ""Bittu Bottu"", ""robot"", ""artificial intelligence"", ""school"", ""homework"", ""electronics"", ""diodes"", ""resistors"", ""capacitors"", ""transistors"", ""integrated circuits"", ""sensors"", ""actuators"", ""controller"", ""power supply"", ""solar powered"", ""rechargeable battery"", ""children's literature"", ""science fiction"", ""family"", ""responsibility""]"
+26391-goby-s-noisy-best-friend.txt,"[""Goby (fish)"", ""Snap (pistol shrimp)"", ""sea bass""]","[""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]","[""deep blue ocean"", ""ocean floor"", ""Snap's burrow""]","[""field"", ""tree tops""]","[""friendship"", ""differences"", ""acceptance"", ""animal relationships"", ""symbiosis"", ""survival"", ""underwater life""]","[""animal behavior"", ""cooperation"", ""warning signals""]","[""Goby and Snap's friendship"", ""Goby's encounter with the sea bass"", ""Snap saving Goby""]","[""Snap cleaning their burrow"", ""Goby swimming alone""]","[""friendship"", ""fear"", ""relief"", ""gratitude""]","[""wonder"", ""curiosity""]","[""Goby"", ""Snap"", ""pistol shrimp"", ""fish"", ""sea bass"", ""friendship"", ""ocean"", ""underwater"", ""animal friends"", ""symbiotic relationships"", ""cattle egret"", ""bees"", ""cow"", ""hermit crab"", ""snail"", ""stork"", ""spotted deer"", ""langur monkey""]" """
+
+try:
+    search_engine.load_data(csv_data=sample_csv_data)
+    logger.info("Sample data loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load sample data: {e}")
 
 # HTML Template
 HTML_TEMPLATE = """
@@ -794,17 +731,39 @@ HTML_TEMPLATE = """
                     <span id="upload-text">Upload CSV</span>
                 </button>
             </form>
-            
-            <!-- Sync from Pinecone Button -->
-            <div class="mt-4 pt-4 border-t border-gray-200">
-                <button id="sync-btn" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center text-sm">
-                    <svg id="sync-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                    </svg>
-                    <span id="sync-text">Sync from Pinecone</span>
-                </button>
-                <p class="text-xs text-gray-500 mt-1">Load stories from existing Pinecone vectors if available</p>
+        </div>
+
+        <!-- CSV Schema Documentation -->
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+            <h3 class="text-lg font-semibold text-blue-900 mb-2">CSV Schema Required</h3>
+            <p class="text-sm text-blue-800 mb-2">Your CSV file must contain these exact columns:</p>
+            <div class="grid grid-cols-2 gap-4 text-xs">
+                <div>
+                    <strong>Required Columns:</strong>
+                    <ul class="list-disc list-inside text-blue-700 mt-1">
+                        <li>filename</li>
+                        <li>character_primary</li>
+                        <li>character_secondary</li>
+                        <li>setting_primary</li>
+                        <li>setting_secondary</li>
+                        <li>theme_primary</li>
+                        <li>theme_secondary</li>
+                    </ul>
+                </div>
+                <div>
+                    <strong>Additional Columns:</strong>
+                    <ul class="list-disc list-inside text-blue-700 mt-1">
+                        <li>events_primary</li>
+                        <li>events_secondary</li>
+                        <li>emotions_primary</li>
+                        <li>emotions_secondary</li>
+                        <li>keywords</li>
+                    </ul>
+                </div>
             </div>
+            <p class="text-xs text-blue-600 mt-2">
+                <strong>Format:</strong> List fields should be formatted as Python lists: <code>["item1", "item2", "item3"]</code>
+            </p>
         </div>
 
         <!-- Search Section -->
@@ -825,6 +784,26 @@ HTML_TEMPLATE = """
                     </button>
                 </div>
             </form>
+
+            <!-- Voice Search Button -->
+            <div class="mt-4 flex items-center justify-center space-x-4">
+                <button id="voice-search-btn" class="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg id="voice-icon" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                    </svg>
+                    <span id="voice-text">Voice Search</span>
+                </button>
+                
+                <button id="delete-stories-btn" class="flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
+                    Delete Stories
+                </button>
+            </div>
+
+            <!-- Audio input (hidden) -->
+            <input type="file" id="audio-input" accept="audio/*" style="display: none;">
 
             <!-- Example Queries -->
             <div class="mt-4">
@@ -877,7 +856,6 @@ HTML_TEMPLATE = """
         // Global variables
         let isSearching = false;
         let isUploading = false;
-        let isSyncing = false;
 
         // DOM elements
         const searchForm = document.getElementById('search-form');
@@ -890,9 +868,6 @@ HTML_TEMPLATE = """
         const uploadBtn = document.getElementById('upload-btn');
         const uploadIcon = document.getElementById('upload-icon');
         const uploadText = document.getElementById('upload-text');
-        const syncBtn = document.getElementById('sync-btn');
-        const syncIcon = document.getElementById('sync-icon');
-        const syncText = document.getElementById('sync-text');
         const errorDisplay = document.getElementById('error-display');
         const errorText = document.getElementById('error-text');
         const resultsSection = document.getElementById('results-section');
@@ -1132,38 +1107,6 @@ HTML_TEMPLATE = """
             }
         }
 
-        async function syncFromPinecone() {
-            if (isSyncing) return;
-            
-            isSyncing = true;
-            syncBtn.disabled = true;
-            syncIcon.classList.add('loading');
-            syncText.textContent = 'Syncing...';
-            hideError();
-
-            try {
-                const response = await fetch('/sync', {
-                    method: 'POST',
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Sync failed: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-                alert(`Success! ${data.stories_synced} stories synced from Pinecone.`);
-                checkHealth(); // Refresh health status
-                
-            } catch (error) {
-                showError(error.message);
-            } finally {
-                isSyncing = false;
-                syncBtn.disabled = false;
-                syncIcon.classList.remove('loading');
-                syncText.textContent = 'Sync from Pinecone';
-            }
-        }
-
         // Event listeners
         searchForm.addEventListener('submit', (e) => {
             e.preventDefault();
@@ -1181,10 +1124,6 @@ HTML_TEMPLATE = """
             }
         });
 
-        syncBtn.addEventListener('click', () => {
-            syncFromPinecone();
-        });
-
         csvFileInput.addEventListener('change', (e) => {
             uploadBtn.disabled = !e.target.files[0];
         });
@@ -1196,6 +1135,135 @@ HTML_TEMPLATE = """
                 searchInput.value = query;
                 performSearch(query);
             });
+        });
+
+        // Voice search functionality
+        const voiceSearchBtn = document.getElementById('voice-search-btn');
+        const voiceIcon = document.getElementById('voice-icon');
+        const voiceText = document.getElementById('voice-text');
+        const audioInput = document.getElementById('audio-input');
+        const deleteStoriesBtn = document.getElementById('delete-stories-btn');
+
+        let isRecording = false;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        voiceSearchBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    
+                    mediaRecorder.ondataavailable = (event) => {
+                        audioChunks.push(event.data);
+                    };
+                    
+                    mediaRecorder.onstop = async () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                        await sendVoiceSearch(audioBlob);
+                        audioChunks = [];
+                    };
+                    
+                    mediaRecorder.start();
+                    isRecording = true;
+                    voiceIcon.classList.add('animate-pulse');
+                    voiceText.textContent = 'Recording... Click to stop';
+                    voiceSearchBtn.classList.add('bg-red-600');
+                    voiceSearchBtn.classList.remove('bg-green-600');
+                    
+                } catch (error) {
+                    showError('Microphone access denied');
+                }
+            } else {
+                mediaRecorder.stop();
+                isRecording = false;
+                voiceIcon.classList.remove('animate-pulse');
+                voiceText.textContent = 'Processing...';
+                voiceSearchBtn.disabled = true;
+            }
+        });
+
+        async function sendVoiceSearch(audioBlob) {
+            try {
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'voice_search.wav');
+                
+                const response = await fetch('/voice-search', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Voice search failed');
+                }
+                
+                const data = await response.json();
+                
+                // Update search input with enhanced query
+                searchInput.value = data.enhanced_query;
+                
+                // Show results
+                renderResults(data.results || []);
+                
+                // Show query transformation
+                if (data.original_query !== data.enhanced_query) {
+                    alert(`Voice: "${data.original_query}"\nEnhanced: "${data.enhanced_query}"`);
+                }
+                
+            } catch (error) {
+                showError('Voice search failed: ' + error.message);
+            } finally {
+                // Reset button
+                voiceText.textContent = 'Voice Search';
+                voiceSearchBtn.disabled = false;
+                voiceSearchBtn.classList.remove('bg-red-600');
+                voiceSearchBtn.classList.add('bg-green-600');
+            }
+        }
+
+        // Delete stories functionality
+        deleteStoriesBtn.addEventListener('click', async () => {
+            try {
+                // First, get list of stories
+                const response = await fetch('/list-stories');
+                const data = await response.json();
+                
+                if (data.stories.length === 0) {
+                    alert('No stories to delete');
+                    return;
+                }
+                
+                // Show confirmation dialog with story list
+                const storyList = data.stories.map(story => `${story.id}: ${story.title}`).join('\\n');
+                const confirmDelete = confirm(`Delete all ${data.stories.length} stories?\n\n${storyList.substring(0, 500)}${storyList.length > 500 ? '...' : ''}`);
+                
+                if (confirmDelete) {
+                    const storyIds = data.stories.map(story => story.id);
+                    
+                    const deleteResponse = await fetch('/delete-stories', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            story_ids: storyIds
+                        })
+                    });
+                    
+                    if (!deleteResponse.ok) {
+                        throw new Error('Delete failed');
+                    }
+                    
+                    const deleteData = await deleteResponse.json();
+                    alert(deleteData.message);
+                    
+                    // Refresh page
+                    location.reload();
+                }
+                
+            } catch (error) {
+                showError('Delete failed: ' + error.message);
+            }
         });
 
         // Initialize
@@ -1214,13 +1282,10 @@ def home():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    stats = search_engine.get_stats()
     return jsonify({
         'status': 'healthy',
-        'pinecone_connected': stats['pinecone_connected'],
-        'stories_loaded': stats['total_stories'],
-        'embedding_provider': stats['embedding_provider'],
-        'embedding_dimension': stats['embedding_dimension']
+        'pinecone_connected': search_engine.index is not None,
+        'stories_loaded': len(search_engine.stories)
     })
 
 @app.route('/search', methods=['POST'])
@@ -1297,26 +1362,187 @@ def upload_data():
         logger.error(f"Upload error: {e}")
         return jsonify({'error': 'Failed to upload data'}), 500
 
-@app.route('/sync', methods=['POST'])
-def sync_from_pinecone():
-    """Sync stories from Pinecone"""
+@app.route('/voice-search', methods=['POST'])
+def voice_search():
+    """Handle voice search"""
+    try:
+        if 'audio' not in request.files:
+            return jsonify({'error': 'No audio file provided'}), 400
+        
+        audio_file = request.files['audio']
+        if audio_file.filename == '':
+            return jsonify({'error': 'No audio file selected'}), 400
+        
+        # Save temporary uploaded file
+        filename = secure_filename(audio_file.filename)
+        raw_path = f"temp_raw_{filename}"
+        audio_file.save(raw_path)
+
+        # Convert to 16-bit mono PCM WAV using pydub
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
+            sound = AudioSegment.from_file(raw_path)
+            sound = sound.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+            sound.export(tmp_wav.name, format="wav")
+            converted_path = tmp_wav.name
+
+        try:
+            # Convert speech to text
+            voice_query = voice_handler.speech_to_text(converted_path)
+
+            # Enhance query with Gemini
+            enhanced_query = voice_handler.enhance_query_with_gemini(voice_query)
+
+            # Perform search
+            results = search_engine.search(enhanced_query, 10)
+
+            # Prepare response
+            response_data = []
+            for result in results:
+                story_dict = asdict(result.story)
+                score = float(result.score) if result.score is not None else 0.0
+                matched_fields = {
+                    field: float(score) if score is not None else 0.0
+                    for field, score in result.matched_fields.items()
+                }
+                response_data.append({
+                    'story': story_dict,
+                    'score': score,
+                    'matched_fields': matched_fields
+                })
+
+            return jsonify({
+                'original_query': voice_query,
+                'enhanced_query': enhanced_query,
+                'results': response_data,
+                'total_found': len(response_data)
+            })
+
+        finally:
+            # Cleanup
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+            if os.path.exists(converted_path):
+                os.remove(converted_path)
+
+    except Exception as e:
+        logger.error(f"Voice search error: {e}")
+        return jsonify({'error': 'Voice search failed'}), 500
+# def voice_search():
+#     """Handle voice search"""
+#     try:
+#         if 'audio' not in request.files:
+#             return jsonify({'error': 'No audio file provided'}), 400
+        
+#         audio_file = request.files['audio']
+#         if audio_file.filename == '':
+#             return jsonify({'error': 'No audio file selected'}), 400
+        
+#         # Save temporary audio file
+#         filename = secure_filename(audio_file.filename)
+#         temp_path = f"temp_{filename}"
+#         audio_file.save(temp_path)
+        
+#         try:
+#             # Convert speech to text
+#             voice_query = voice_handler.speech_to_text(temp_path)
+            
+#             # Enhance query with Gemini
+#             enhanced_query = voice_handler.enhance_query_with_gemini(voice_query)
+            
+#             # Perform search
+#             results = search_engine.search(enhanced_query, 10)
+            
+#             # Convert results to JSON-serializable format
+#             response_data = []
+#             for result in results:
+#                 story_dict = asdict(result.story)
+#                 score = float(result.score) if result.score is not None else 0.0
+#                 matched_fields = {
+#                     field: float(score) if score is not None else 0.0 
+#                     for field, score in result.matched_fields.items()
+#                 }
+                
+#                 response_data.append({
+#                     'story': story_dict,
+#                     'score': score,
+#                     'matched_fields': matched_fields
+#                 })
+            
+#             return jsonify({
+#                 'original_query': voice_query,
+#                 'enhanced_query': enhanced_query,
+#                 'results': response_data,
+#                 'total_found': len(response_data)
+#             })
+            
+#         finally:
+#             # Clean up temporary file
+#             if os.path.exists(temp_path):
+#                 os.remove(temp_path)
+                
+#     except Exception as e:
+#         logger.error(f"Voice search error: {e}")
+#         return jsonify({'error': 'Voice search failed'}), 500
+
+@app.route('/delete-stories', methods=['POST'])
+def delete_stories():
+    """Delete stories from Pinecone"""
     try:
         if not search_engine.index:
             return jsonify({'error': 'Pinecone not connected'}), 400
         
-        stories_before = len(search_engine.stories)
-        search_engine._sync_from_pinecone()
-        stories_after = len(search_engine.stories)
+        data = request.get_json()
+        story_ids = data.get('story_ids', [])
+        
+        if not story_ids:
+            return jsonify({'error': 'No story IDs provided'}), 400
+        
+        # Delete from Pinecone
+        vectors_to_delete = []
+        for story_id in story_ids:
+            for field in search_engine.semantic_fields:
+                vectors_to_delete.append(f"{story_id}_{field}")
+        
+        if vectors_to_delete:
+            search_engine.index.delete(ids=vectors_to_delete)
+        
+        # Delete from local storage
+        deleted_count = 0
+        for story_id in story_ids:
+            if story_id in search_engine.stories:
+                del search_engine.stories[story_id]
+                deleted_count += 1
         
         return jsonify({
-            'message': 'Sync completed successfully',
-            'stories_synced': stories_after - stories_before,
-            'total_stories': stories_after
+            'message': f'Successfully deleted {deleted_count} stories',
+            'deleted_count': deleted_count,
+            'remaining_stories': len(search_engine.stories)
         })
         
     except Exception as e:
-        logger.error(f"Sync error: {e}")
-        return jsonify({'error': 'Failed to sync from Pinecone'}), 500
+        logger.error(f"Delete error: {e}")
+        return jsonify({'error': 'Failed to delete stories'}), 500
+
+@app.route('/list-stories', methods=['GET'])
+def list_stories():
+    """List all available stories"""
+    try:
+        stories_list = []
+        for story_id, story in search_engine.stories.items():
+            stories_list.append({
+                'id': story_id,
+                'filename': story.filename,
+                'title': story.filename.replace('.txt', '').replace('-', ' ').title()
+            })
+        
+        return jsonify({
+            'stories': stories_list,
+            'total_count': len(stories_list)
+        })
+        
+    except Exception as e:
+        logger.error(f"List stories error: {e}")
+        return jsonify({'error': 'Failed to list stories'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
