@@ -9,7 +9,5 @@ python-dotenv
 gunicorn
 scikit-learn
 requests
-SpeechRecognition 
-pyttsx3 
-pyaudio
+SpeechRecognition  
 google-generativeai
