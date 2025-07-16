@@ -63,7 +63,7 @@ class VoiceHandler:
             r = sr.Recognizer()
             with sr.AudioFile(audio_file) as source:
                 audio = r.record(source)
-            return r.recognize_google(audio)
+            return get_font(r.recognize_google(audio))
         except Exception as e:
             logger.error(f"Speech recognition error: {e}")
             raise
@@ -704,7 +704,7 @@ class StorySearchEngine:
             logger.warning(f"Local semantic search failed for {story_id}.{field}: {e}")
             return 0.0
     
-    def search(self, query: str, top_k: int = 10) -> List[SearchResult]:
+    def search(self, query: str, top_k: int = 20) -> List[SearchResult]:
         """Search stories using hybrid approach"""
         if not query.strip():
             return []
@@ -810,14 +810,6 @@ search_engine = StorySearchEngine()
 
 # Initialize voice handler
 voice_handler = VoiceHandler()
-
-
-
-try:
-    search_engine.load_data(csv_data=sample_csv_data)
-    logger.info("Sample data loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load sample data: {e}")
 
 # HTML Template
 HTML_TEMPLATE = """
@@ -1204,7 +1196,7 @@ HTML_TEMPLATE = """
                     },
                     body: JSON.stringify({
                         query: query.trim(),
-                        top_k: 10
+                        top_k: 20
                     }),
                 });
 
@@ -1484,6 +1476,51 @@ def health_check():
         'embedding_dimension': stats['embedding_dimension']
     })
 
+def translate_to_english(text):
+    """Translate text to English using Gemini"""
+    try:
+        # Create translation prompt
+        prompt = f"""
+        Translate the following text to English if from a different language, or returnt the original text if already in english. Only return the translation, no additional text:
+        
+        Text to translate: {text}
+        """
+        gemini_api_key = os.getenv('GOOGLE_API_KEY')
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        translated_text = response.text.strip()
+        
+        return translated_text
+        
+    except Exception as e:
+        logging.error(f"Translation error: {e}")
+        # Return original text if translation fails
+        return text, 'unknown'
+    
+def get_font(text):
+    """Translate text to English using Gemini"""
+    try:
+        # Create translation prompt
+        prompt = f"""
+        Write the text in the script it's spoken, like text in devnagri script for Hindi, text in Arabic script for Arabic, etc. If the text is already in English, return 'as it is. Only return the scripted text, no additional text:        
+        Text to translate: {text}
+        """
+        gemini_api_key = os.getenv('GOOGLE_API_KEY')
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        translated_text = response.text.strip()
+        
+        return translated_text
+        
+    except Exception as e:
+        logging.error(f"Translation error: {e}")
+        # Return original text if translation fails
+        return text, 'unknown'
+    
 @app.route('/search', methods=['POST'])
 def search_stories():
     """Search stories endpoint"""
@@ -1494,12 +1531,15 @@ def search_stories():
             return jsonify({'error': 'Query is required'}), 400
         
         query = data['query'].strip()
-        top_k = data.get('top_k', 10)
+        top_k = data.get('top_k', 20)
         
         if not query:
             return jsonify({'error': 'Query cannot be empty'}), 400
         
+        
         # Perform search
+        query = translate_to_english(query)
+        print(f"Search query: {query}")
         results = search_engine.search(query, top_k)
         
         # Convert results to JSON-serializable format
@@ -1586,10 +1626,15 @@ def voice_search():
             voice_query = voice_handler.speech_to_text(converted_path)
 
             # Enhance query with Gemini
-            enhanced_query = voice_handler.enhance_query_with_gemini(voice_query)
-
+            # enhanced_query = voice_handler.enhance_query_with_gemini(voice_query)
+            enhanced_query = voice_query
+            query = enhanced_query
+            f_query = get_font(query)
+            print(f"Voice query: (translated: {f_query})")
+            query = translate_to_english(query)
+            print(f"Search query: {query}")
             # Perform search
-            results = search_engine.search(enhanced_query, 10)
+            results = search_engine.search(query, 20)
 
             # Prepare response
             response_data = []
