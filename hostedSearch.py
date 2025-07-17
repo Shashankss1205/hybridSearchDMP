@@ -21,6 +21,7 @@ from werkzeug.utils import secure_filename
 from pydub import AudioSegment
 import tempfile
 import pickle
+from sarvamai import SarvamAI
 
 
 
@@ -42,66 +43,81 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
-class VoiceHandler:
-    """Handle voice input/output using Gemini"""
+# class VoiceHandler:
+#     """Handle voice input/output using Gemini"""
     
-    def __init__(self):
-        self.gemini_api_key = os.getenv('GOOGLE_API_KEY')
-        self.model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+#     def __init__(self):
+#         self.gemini_api_key = os.getenv('GOOGLE_API_KEY')
+#         self.model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
         
-        if self.gemini_api_key:
-            genai.configure(api_key=self.gemini_api_key)
-            self.model = genai.GenerativeModel(self.model_name)
-            logger.info("Gemini voice handler initialized")
-        else:
-            logger.warning("No Gemini API key found - voice features disabled")
-            self.model = None
+#         if self.gemini_api_key:
+#             genai.configure(api_key=self.gemini_api_key)
+#             self.model = genai.GenerativeModel(self.model_name)
+#             logger.info("Gemini voice handler initialized")
+#         else:
+#             logger.warning("No Gemini API key found - voice features disabled")
+#             self.model = None
     
-    def speech_to_text(self, audio_file) -> str:
-        """Convert speech to text"""
-        try:
-            r = sr.Recognizer()
-            with sr.AudioFile(audio_file) as source:
-                audio = r.record(source)
-            return get_font(r.recognize_google(audio))
-        except Exception as e:
-            logger.error(f"Speech recognition error: {e}")
-            raise
+#     def speech_to_text(self, audio_file) -> str:
+#         """Convert speech to text"""
+#         try:
+#             r = sr.Recognizer()
+#             with sr.AudioFile(audio_file) as source:
+#                 audio = r.record(source)
+#             return get_font(r.recognize_google(audio))
+#         except Exception as e:
+#             logger.error(f"Speech recognition error: {e}")
+#             raise
     
-    def enhance_query_with_gemini(self, voice_query: str) -> str:
-        """Use Gemini to enhance voice query for better search"""
-        if not self.model:
-            return voice_query
+#     def enhance_query_with_gemini(self, voice_query: str) -> str:
+#         """Use Gemini to enhance voice query for better search"""
+#         if not self.model:
+#             return voice_query
             
-        try:
-            prompt = f"""
-            Convert this voice query into a better search query for a story search engine.
-            Focus on extracting themes, emotions, characters, settings, and events.
+#         try:
+#             prompt = f"""
+#             Convert this voice query into a better search query for a story search engine.
+#             Focus on extracting themes, emotions, characters, settings, and events.
             
-            Voice query: "{voice_query}"
+#             Voice query: "{voice_query}"
             
-            Return only the improved search query, nothing else.
-            """
+#             Return only the improved search query, nothing else.
+#             """
             
-            response = self.model.generate_content(prompt)
-            return response.text.strip()
+#             response = self.model.generate_content(prompt)
+#             return response.text.strip()
             
-        except Exception as e:
-            logger.error(f"Gemini enhancement error: {e}")
-            return voice_query
+#         except Exception as e:
+#             logger.error(f"Gemini enhancement error: {e}")
+#             return voice_query
     
-    # def text_to_speech(self, text: str) -> str:
-    #     """Convert text to speech and return audio file path"""
-    #     try:
-    #         engine = pyttsx3.init()
-    #         audio_file = f"temp_audio_{int(time.time())}.wav"
-    #         engine.save_to_file(text, audio_file)
-    #         engine.runAndWait()
-    #         return audio_file
-    #     except Exception as e:
-    #         logger.error(f"Text to speech error: {e}")
-    #         raise
+class VoiceHandler:
+    """Handle speech-to-text using SarvamAI Saarika (v2.5)"""
 
+    def __init__(self):
+        self.api_key = os.getenv("SARVAM_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("Please set SARVAM_API_KEY env var")
+        self.client = SarvamAI(api_subscription_key=self.api_key)
+
+    def speech_to_text(self, audio_path: str,
+                       model: str = "saarika:v2.5",
+                       language_code: str = "unknown"):
+        """
+        Transcribe audio via SarvamAI:
+          • audio_path: path to .wav/.mp3 file
+          • model: one of saarika:v1, v2, v2.5, flash
+          • language_code: BCP‑47 code or 'unknown' for auto-detect
+        """
+        with open(audio_path, "rb") as f:
+            resp = self.client.speech_to_text.transcribe(
+                file=f,
+                model=model,
+                language_code=language_code,
+            )
+        # resp is a dict with keys: request_id, transcript, timestamps (if requested)
+        print(resp)
+        return resp.transcript
 app = Flask(__name__)
 CORS(app)
 app.json_encoder = NumpyEncoder
