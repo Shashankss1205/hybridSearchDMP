@@ -12,3 +12,4 @@ requests
 SpeechRecognition  
 google-generativeai
 pydub
+sarvamai
