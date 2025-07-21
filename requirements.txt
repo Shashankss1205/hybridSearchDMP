@@ -13,3 +13,4 @@ SpeechRecognition
 google-generativeai
 pydub
 sarvamai
+supabase
