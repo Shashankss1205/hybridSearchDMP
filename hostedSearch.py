@@ -1677,12 +1677,10 @@ HTML_TEMPLATE = """
             const content = document.createElement('div');
             content.className = 'bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[80vh] overflow-hidden flex flex-col';
             
-            const feedbackCount = feedbackData ? feedbackData.length : 0;
-            
             content.innerHTML = `
                 <div class="p-6 border-b">
                     <div class="flex items-center justify-between">
-                        <h2 class="text-2xl font-bold text-gray-900">All Feedback (${feedbackCount})</h2>
+                        <h2 class="text-2xl font-bold text-gray-900">All Feedback</h2>
                         <button class="text-gray-500 hover:text-gray-700" onclick="this.closest('.fixed').remove()">
                             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
@@ -1691,10 +1689,8 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div class="p-6 overflow-auto flex-1">
-                    ${feedbackCount === 0 ? 
-                        '<div class="text-center text-gray-500">No feedback available</div>' :
-                        `<div class="space-y-4">
-                            ${feedbackData.map(feedback => `
+                    <div class="space-y-4">
+                        ${feedbackData.map(feedback => `
                             <div class="bg-gray-50 rounded-lg p-4">
                                 <div class="flex items-start justify-between">
                                     <div class="space-y-1">
@@ -1945,30 +1941,6 @@ def submit_feedback():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/get-feedback', methods=['GET'])
-def get_feedback():
-    """Get all feedback records"""
-    try:
-        # Get feedback from Supabase using the feedback_db instance
-        feedback_records = feedback_db.get_all_feedback()
-        
-        # Transform the data to include all necessary fields
-        formatted_feedback = []
-        for record in feedback_records:
-            formatted_feedback.append({
-                'id': record.get('id'),
-                'query': record.get('query', ''),
-                'story_id': record.get('story_id', ''),
-                'feedback_text': record.get('feedback_text', ''),
-                'timestamp': record.get('timestamp', ''),
-                'user_ip': record.get('user_ip', '')
-            })
-        
-        return jsonify({'feedback': formatted_feedback})
-    except Exception as e:
-        print(f"Error fetching feedback: {str(e)}")  # For debugging
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/voice-search', methods=['POST'])
 def voice_search():
     """Handle voice search"""
@@ -2121,20 +2093,29 @@ def list_stories():
         logger.error(f"List stories error: {e}")
         return jsonify({'error': 'Failed to list stories'}), 500
     
-@app.route('/admin/feedback', methods=['GET'])
-def get_all_feedback():
-    """Get all feedback records (admin endpoint)"""
+@app.route('/get-feedback', methods=['GET'])
+def get_feedback():
+    """Get all feedback records"""
     try:
+        # Get feedback from Supabase using the feedback_db instance
         feedback_records = feedback_db.get_all_feedback()
-        return jsonify({
-            'feedback': feedback_records,
-            'total_count': len(feedback_records)
-        })
         
+        # Transform the data to include all necessary fields
+        formatted_feedback = []
+        for record in feedback_records:
+            formatted_feedback.append({
+                'id': record.get('id'),
+                'query': record.get('query', ''),
+                'story_id': record.get('story_id', ''),
+                'feedback_text': record.get('feedback_text', ''),
+                'timestamp': record.get('timestamp', ''),
+                'user_ip': record.get('user_ip', '')
+            })
+        
+        return jsonify({'feedback': formatted_feedback})
     except Exception as e:
-        logger.error(f"Get feedback error: {e}")
-        return jsonify({'error': 'Failed to retrieve feedback'}), 500
-
+        print(f"Error fetching feedback: {str(e)}")  # For debugging
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
