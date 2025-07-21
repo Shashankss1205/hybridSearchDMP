@@ -327,7 +327,7 @@ class StorySearchEngine:
         self.pc = None
         self.index = None
         self.stories = {}
-        self.stories_backup_file = "stories_backup.pkl"
+        self.stories_backup_file = "stories_test_backup.pkl"
         
         # Initialize Pinecone
         self._init_pinecone()
@@ -378,7 +378,10 @@ class StorySearchEngine:
             # Use provider-specific index name to avoid dimension conflicts
             embedding_dim = self.model.get_sentence_embedding_dimension()
             index_name = f"story-search-{self.model.provider}-{embedding_dim}"
+            test_db = os.getenv('TEST_DB')
             
+            if test_db=='1':
+                index_name = f"story-search-{self.model.provider}-{embedding_dim}-test"
             # Create index if it doesn't exist - use dynamic dimension
             if index_name not in self.pc.list_indexes().names():
                 self.pc.create_index(
@@ -390,6 +393,16 @@ class StorySearchEngine:
                         region='us-east-1'
                     )
                 )
+                if test_db==1:
+                    self.pc.create_index(
+                        name=index_name,
+                        dimension=embedding_dim,
+                        metric='cosine',
+                        spec=ServerlessSpec(
+                            cloud='aws',
+                            region='us-east-1'
+                        )
+                    )
                 logger.info(f"Created Pinecone index: {index_name} with dimension {embedding_dim}")
             else:
                 # Verify existing index has correct dimension
@@ -679,12 +692,12 @@ class StorySearchEngine:
             best_score = 0.0
             
             # Check exact match
-            if query_word in field_text:
+            if query_word in field_text.split():
                 best_score = 1.0
             else:
                 # Fuzzy matching
                 for field_value in field_values:
-                    fuzzy_score = fuzz.partial_ratio(query_word, field_value.lower()) / 100.0
+                    fuzzy_score = fuzz.ratio(query_word, field_value.lower()) / 100.0
                     if fuzzy_score >= 0.8:
                         best_score = max(best_score, fuzzy_score * 0.8)
             
@@ -792,6 +805,7 @@ class StorySearchEngine:
             for field in self.keyword_fields:
                 field_values = getattr(story, field)
                 score = self._keyword_search(query, field_values)
+                
                 # Ensure score is a Python float
                 score = float(score) if score is not None else 0.0
                 results[story_id]['scores'][field] = score
@@ -1118,8 +1132,9 @@ HTML_TEMPLATE = """
 
                 const fieldHtml = storyFields.map(([fieldName, fieldValues]) => {
                     const icon = getFieldIcon(fieldName);
-                    const displayValues = fieldValues.slice(0, 3);
-                    const remainingCount = fieldValues.length - 3;
+                    console.log(fieldValues)
+                    const displayValues = fieldValues;
+                    const remainingCount = fieldValues;
                     
                     return `
                         <div class="bg-gray-50 rounded-lg p-3">
@@ -1497,7 +1512,7 @@ def translate_to_english(text):
     try:
         # Create translation prompt
         prompt = f"""
-        Translate the following text to English if from a different language, or returnt the original text if already in english. Only return the translation, no additional text:
+        Translate the following text to English if from a different language, or return the original text if already in english. Only return the translation, no additional text:
         
         Text to translate: {text}
         """
@@ -1574,7 +1589,7 @@ def search_stories():
                 'score': score,
                 'matched_fields': matched_fields
             })
-        
+            # print(response_data)
         return jsonify({
             'query': query,
             'results': response_data,
