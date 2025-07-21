@@ -22,9 +22,10 @@ from pydub import AudioSegment
 import tempfile
 import pickle
 from sarvamai import SarvamAI
-import sqlite3
+# import sqlite3
 from datetime import datetime
-import threading
+# import threading
+from supabase import create_client, Client
 
 
 # Load environment variables
@@ -841,45 +842,108 @@ class StorySearchEngine:
         }
 
 class FeedbackDB:
-    def __init__(self, db_path='feedback.db'):
-        self.db_path = db_path
-        self.lock = threading.Lock()
+    def __init__(self, supabase_url: str = None, supabase_key: str = None):
+        """
+        Initialize Supabase client
+        Args:
+            supabase_url: Supabase project URL (or set SUPABASE_URL env var)
+            supabase_key: Supabase anon key (or set SUPABASE_ANON_KEY env var)
+        """
+        self.supabase_url = supabase_url or os.getenv('SUPABASE_URL')
+        self.supabase_key = supabase_key or os.getenv('SUPABASE_ANON_KEY')
+        
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("Supabase URL and key must be provided either as parameters or environment variables")
+        
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
         self.init_db()
     
     def init_db(self):
-        """Initialize the feedback database"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS feedback (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query TEXT NOT NULL,
-                    story_id TEXT NOT NULL,
-                    feedback_text TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    user_ip TEXT
-                )
-            ''')
-            conn.commit()
+        """
+        Initialize the feedback table in Supabase
+        Note: You should run this SQL in Supabase SQL Editor instead:
+        
+        CREATE TABLE IF NOT EXISTS feedback (
+            id SERIAL PRIMARY KEY,
+            query TEXT NOT NULL,
+            story_id TEXT NOT NULL,
+            feedback_text TEXT NOT NULL,
+            timestamp TIMESTAMPTZ DEFAULT NOW(),
+            user_ip TEXT
+        );
+        """
+        # Check if table exists by trying to select from it
+        try:
+            result = self.supabase.table('feedback').select('id').limit(1).execute()
+            print("Feedback table exists")
+        except Exception as e:
+            print(f"Warning: Could not verify feedback table exists. Error: {e}")
+            print("Please create the table manually in Supabase SQL Editor using the SQL in the docstring above.")
     
-    def save_feedback(self, query, story_id, feedback_text, user_ip=None):
-        """Save feedback to database"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute('''
-                    INSERT INTO feedback (query, story_id, feedback_text, user_ip)
-                    VALUES (?, ?, ?, ?)
-                ''', (query, story_id, feedback_text, user_ip))
-                conn.commit()
+    def save_feedback(self, query: str, story_id: str, feedback_text: str, user_ip: Optional[str] = None) -> bool:
+        """
+        Save feedback to Supabase
+        Returns True if successful, False otherwise
+        """
+        try:
+            data = {
+                'query': query,
+                'story_id': story_id,
+                'feedback_text': feedback_text,
+                'user_ip': user_ip,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            result = self.supabase.table('feedback').insert(data).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error saving feedback: {e}")
+            return False
     
-    def get_all_feedback(self):
-        """Get all feedback records"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute('''
-                SELECT * FROM feedback ORDER BY timestamp DESC
-            ''')
-            return [dict(row) for row in cursor.fetchall()]
-
+    def get_all_feedback(self) -> List[Dict]:
+        """
+        Get all feedback records ordered by timestamp (newest first)
+        Returns list of dictionaries
+        """
+        try:
+            result = self.supabase.table('feedback').select('*').order('timestamp', desc=True).execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting feedback: {e}")
+            return []
+    
+    def get_feedback_by_story_id(self, story_id: str) -> List[Dict]:
+        """Get feedback for a specific story"""
+        try:
+            result = self.supabase.table('feedback').select('*').eq('story_id', story_id).order('timestamp', desc=True).execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting feedback by story_id: {e}")
+            return []
+    
+    def get_recent_feedback(self, limit: int = 50) -> List[Dict]:
+        """Get recent feedback with limit"""
+        try:
+            result = self.supabase.table('feedback').select('*').order('timestamp', desc=True).limit(limit).execute()
+            return result.data
+            
+        except Exception as e:
+            print(f"Error getting recent feedback: {e}")
+            return []
+    
+    def delete_feedback(self, feedback_id: int) -> bool:
+        """Delete feedback by ID"""
+        try:
+            result = self.supabase.table('feedback').delete().eq('id', feedback_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            print(f"Error deleting feedback: {e}")
+            return False
+        
 # Initialize feedback DB after search_engine initialization
 feedback_db = FeedbackDB()
 
@@ -1017,6 +1081,12 @@ HTML_TEMPLATE = """
                     <span id="voice-text">Voice Search</span>
                 </button>
                 
+                <button id="view-feedback-btn" class="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-1.586l-4.707 4.707z"></path>
+                    </svg>
+                    View All Feedback
+                </button>
                 <button id="delete-stories-btn" class="flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
@@ -1596,6 +1666,71 @@ HTML_TEMPLATE = """
             }
         }
 
+        // View feedback functionality
+        const viewFeedbackBtn = document.getElementById('view-feedback-btn');
+        
+        async function showFeedbackModal(feedbackData) {
+            // Create modal
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50';
+            
+            const content = document.createElement('div');
+            content.className = 'bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[80vh] overflow-hidden flex flex-col';
+            
+            const feedbackCount = feedbackData ? feedbackData.length : 0;
+            
+            content.innerHTML = `
+                <div class="p-6 border-b">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-2xl font-bold text-gray-900">All Feedback (${feedbackCount})</h2>
+                        <button class="text-gray-500 hover:text-gray-700" onclick="this.closest('.fixed').remove()">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-6 overflow-auto flex-1">
+                    ${feedbackCount === 0 ? 
+                        '<div class="text-center text-gray-500">No feedback available</div>' :
+                        `<div class="space-y-4">
+                            ${feedbackData.map(feedback => `
+                            <div class="bg-gray-50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="space-y-1">
+                                        <p class="text-sm font-medium text-gray-900">Query: "${feedback.query}"</p>
+                                        <p class="text-sm text-gray-600">Story ID: ${feedback.story_id}</p>
+                                        <p class="text-sm text-gray-500">${new Date(feedback.timestamp).toLocaleString()}</p>
+                                    </div>
+                                </div>
+                                <div class="mt-2">
+                                    <p class="text-gray-700">${feedback.feedback_text}</p>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+            
+            modal.appendChild(content);
+            document.body.appendChild(modal);
+        }
+        
+        viewFeedbackBtn.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/get-feedback');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch feedback');
+                }
+                
+                const data = await response.json();
+                showFeedbackModal(data.feedback);
+                
+            } catch (error) {
+                showError('Failed to load feedback: ' + error.message);
+            }
+        });
+
         // Delete stories functionality
         deleteStoriesBtn.addEventListener('click', async () => {
             try {
@@ -1808,6 +1943,30 @@ def submit_feedback():
         return jsonify({'message': 'Feedback submitted successfully'})
         
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/get-feedback', methods=['GET'])
+def get_feedback():
+    """Get all feedback records"""
+    try:
+        # Get feedback from Supabase using the feedback_db instance
+        feedback_records = feedback_db.get_all_feedback()
+        
+        # Transform the data to include all necessary fields
+        formatted_feedback = []
+        for record in feedback_records:
+            formatted_feedback.append({
+                'id': record.get('id'),
+                'query': record.get('query', ''),
+                'story_id': record.get('story_id', ''),
+                'feedback_text': record.get('feedback_text', ''),
+                'timestamp': record.get('timestamp', ''),
+                'user_ip': record.get('user_ip', '')
+            })
+        
+        return jsonify({'feedback': formatted_feedback})
+    except Exception as e:
+        print(f"Error fetching feedback: {str(e)}")  # For debugging
         return jsonify({'error': str(e)}), 500
 
 @app.route('/voice-search', methods=['POST'])
