@@ -22,7 +22,9 @@ from pydub import AudioSegment
 import tempfile
 import pickle
 from sarvamai import SarvamAI
-
+import sqlite3
+from datetime import datetime
+import threading
 
 
 # Load environment variables
@@ -571,6 +573,9 @@ class StorySearchEngine:
             if csv_data:
                 # Parse from string data
                 df = pd.read_csv(io.StringIO(csv_data))
+                if 'story_id' in df.columns:
+                    from converter import format_column
+                    df = format_column(df)
             elif csv_path:
                 df = pd.read_csv(csv_path)
                 df = df[~df.isin(['Error parsing','Error']).any(axis=1)]
@@ -834,6 +839,49 @@ class StorySearchEngine:
             'embedding_provider': self.model.provider,
             'embedding_dimension': self.model.dimension
         }
+
+class FeedbackDB:
+    def __init__(self, db_path='feedback.db'):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self.init_db()
+    
+    def init_db(self):
+        """Initialize the feedback database"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query TEXT NOT NULL,
+                    story_id TEXT NOT NULL,
+                    feedback_text TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    user_ip TEXT
+                )
+            ''')
+            conn.commit()
+    
+    def save_feedback(self, query, story_id, feedback_text, user_ip=None):
+        """Save feedback to database"""
+        with self.lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO feedback (query, story_id, feedback_text, user_ip)
+                    VALUES (?, ?, ?, ?)
+                ''', (query, story_id, feedback_text, user_ip))
+                conn.commit()
+    
+    def get_all_feedback(self):
+        """Get all feedback records"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT * FROM feedback ORDER BY timestamp DESC
+            ''')
+            return [dict(row) for row in cursor.fetchall()]
+
+# Initialize feedback DB after search_engine initialization
+feedback_db = FeedbackDB()
 
 # Initialize search engine
 search_engine = StorySearchEngine()
@@ -1109,7 +1157,7 @@ HTML_TEMPLATE = """
             return icons[fieldName] || '📖';
         }
 
-        function renderResults(results) {
+        function renderResults(results, currentQuery = '') {
             if (!results || results.length === 0) {
                 resultsSection.classList.add('hidden');
                 noResults.classList.remove('hidden');
@@ -1132,7 +1180,6 @@ HTML_TEMPLATE = """
 
                 const fieldHtml = storyFields.map(([fieldName, fieldValues]) => {
                     const icon = getFieldIcon(fieldName);
-                    console.log(fieldValues)
                     const displayValues = fieldValues;
                     const remainingCount = fieldValues;
                     
@@ -1186,13 +1233,48 @@ HTML_TEMPLATE = """
                             </div>
                             
                             ${scoreHtml ? `
-                                <div class="border-t pt-4">
+                                <div class="border-t pt-4 mb-4">
                                     <h4 class="text-sm font-medium text-gray-700 mb-2">Field Match Scores</h4>
                                     <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
                                         ${scoreHtml}
                                     </div>
                                 </div>
                             ` : ''}
+                            
+                            <!-- Feedback Section -->
+                            <div class="border-t pt-4">
+                                <h4 class="text-sm font-medium text-gray-700 mb-3 flex items-center">
+                                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-1.586l-4.707 4.707z"></path>
+                                    </svg>
+                                    Share your feedback
+                                </h4>
+                                <div class="space-y-2">
+                                    <textarea 
+                                        id="feedback-${story.id}" 
+                                        placeholder="How well does this story match your search? Any suggestions for improvement?"
+                                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm resize-none"
+                                        rows="2"
+                                    ></textarea>
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-xs text-gray-500">Help us improve our recommendations</span>
+                                        <button 
+                                            onclick="submitFeedback('${story.id}', '${encodeURIComponent(currentQuery)}', ${index}, event)"
+                                            class="px-4 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors"
+                                        >
+                                            Submit Feedback
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="feedback-status-${story.id}" class="mt-2 hidden">
+                                    <div class="flex items-center text-xs text-green-600">
+                                        <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                        </svg>
+                                        Thank you for your feedback!
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 `;
@@ -1236,7 +1318,7 @@ HTML_TEMPLATE = """
                 }
 
                 const data = await response.json();
-                renderResults(data.results || []);
+                renderResults(data.results || [], query);
                 
             } catch (error) {
                 showError(error.message);
@@ -1286,7 +1368,84 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function submitFeedback(storyId, query, resultIndex, event) {
+            const button = event.target;
+            const originalText = button.textContent;
+            try {
+                const textareaId = `feedback-${storyId}`;
+                const statusId = `feedback-status-${storyId}`;
+                
+                const textarea = document.getElementById(textareaId);
+                const statusDiv = document.getElementById(statusId);
+                const feedback = textarea.value.trim();
+                
+                if (!feedback) {
+                    showError('Please enter your feedback before submitting');
+                    return;
+                }
+                
+                // Disable the button temporarily
+                button.disabled = true;
+                button.textContent = 'Submitting...';
+                
+                const response = await fetch('/submit-feedback', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        story_id: storyId,
+                        feedback: feedback
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to submit feedback');
+                }
+                
+                // Show success message
+                textarea.value = '';
+                textarea.disabled = true;
+                button.style.display = 'none';
+                statusDiv.classList.remove('hidden');
+                
+                // Optional: Show a brief success message
+                showSuccess('Feedback submitted successfully!');
+                
+            } catch (error) {
+                showError('Failed to submit feedback: ' + error.message);
+                // Re-enable button on error
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
         
+        function showSuccess(message) {
+            // Create or update success display
+            let successDisplay = document.getElementById('success-display');
+            if (!successDisplay) {
+                successDisplay = document.createElement('div');
+                successDisplay.id = 'success-display';
+                successDisplay.className = 'fixed top-4 right-4 bg-green-50 border border-green-200 rounded-lg p-4 flex items-center z-50 shadow-lg';
+                successDisplay.innerHTML = `
+                    <svg class="w-5 h-5 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span id="success-text" class="text-green-700"></span>
+                `;
+                document.body.appendChild(successDisplay);
+            }
+            
+            document.getElementById('success-text').textContent = message;
+            successDisplay.classList.remove('hidden');
+            
+            setTimeout(() => {
+                successDisplay.classList.add('hidden');
+            }, 3000);
+        }
+
+
         async function syncFromPinecone() {
             if (isSyncing) return;
             
@@ -1419,7 +1578,7 @@ HTML_TEMPLATE = """
                 searchInput.value = data.enhanced_query;
                 
                 // Show results
-                renderResults(data.results || []);
+                renderResults(data.results || [], data.enhanced_query);
                 
                 // Show query transformation
                 if (data.original_query !== data.enhanced_query) {
@@ -1629,6 +1788,28 @@ def upload_data():
         logger.error(f"Upload error: {e}")
         return jsonify({'error': 'Failed to upload data'}), 500
 
+@app.route('/submit-feedback', methods=['POST'])
+def submit_feedback():
+    """Submit user feedback for search results"""
+    try:
+        data = request.get_json()
+        print(data)
+        if not data or 'query' not in data or 'story_id' not in data or 'feedback' not in data:
+            return jsonify({'error': 'Missing required fields'}), 400
+            
+        # Save feedback to database
+        feedback_db.save_feedback(
+            query=data['query'],
+            story_id=data['story_id'],
+            feedback_text=data['feedback'],
+            user_ip=request.remote_addr
+        )
+        
+        return jsonify({'message': 'Feedback submitted successfully'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/voice-search', methods=['POST'])
 def voice_search():
     """Handle voice search"""
@@ -1780,6 +1961,21 @@ def list_stories():
     except Exception as e:
         logger.error(f"List stories error: {e}")
         return jsonify({'error': 'Failed to list stories'}), 500
+    
+@app.route('/admin/feedback', methods=['GET'])
+def get_all_feedback():
+    """Get all feedback records (admin endpoint)"""
+    try:
+        feedback_records = feedback_db.get_all_feedback()
+        return jsonify({
+            'feedback': feedback_records,
+            'total_count': len(feedback_records)
+        })
+        
+    except Exception as e:
+        logger.error(f"Get feedback error: {e}")
+        return jsonify({'error': 'Failed to retrieve feedback'}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
