@@ -15,7 +15,7 @@ import logging
 from dotenv import load_dotenv
 import io
 import time
-import google.generativeai as genai
+import google.generativeai as generative_ai
 import speech_recognition as sr
 from werkzeug.utils import secure_filename
 from pydub import AudioSegment
@@ -26,7 +26,7 @@ from sarvamai import SarvamAI
 from datetime import datetime
 # import threading
 from supabase import create_client, Client
-
+from google import genai
 
 # Load environment variables
 load_dotenv()
@@ -236,28 +236,39 @@ class APIEmbeddingModel:
     
     def _encode_google(self, texts: List[str]) -> np.ndarray:
         """Google embeddings"""
-        embeddings = []
+        # embeddings = []
         
-        for text in texts:
-            headers = {
-                "Content-Type": "application/json"
-            }
+        # for text in texts:
+        #     headers = {
+        #         "Content-Type": "application/json"
+        #     }
             
-            data = {
-                "model": f"models/{self.model_name}",
-                "content": {
-                    "parts": [{"text": text}]
-                }
-            }
+        #     data = {
+        #         "model": f"models/{self.model_name}",
+        #         "content": {
+        #             "parts": [{"text": text}]
+        #         }
+        #     }
             
-            url = f"{self.base_url}?key={self.api_key}"
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            response.raise_for_status()
+        #     url = f"{self.base_url}?key={self.api_key}"
+        #     response = requests.post(url, headers=headers, json=data, timeout=30)
+        #     response.raise_for_status()
             
-            result = response.json()
-            embeddings.append(result['embedding']['values'])
+        #     result = response.json()
+        #     embeddings.append(result['embedding']['values'])
         
-        return np.array(embeddings)
+        # return np.array(embeddings)
+        client = genai.Client()
+        # result = [
+        #     np.array(e.values) for e in client.models.embed_content(
+
+        result = client.models.embed_content(
+                model=self.model_name,
+                contents=texts, 
+                config=genai.types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"))
+
+        return np.array(result.embeddings)
+
     
     def _encode_cohere(self, texts: List[str]) -> np.ndarray:
         """Cohere embeddings"""
@@ -383,8 +394,8 @@ class StorySearchEngine:
             index_name = f"story-search-{self.model.provider}-{embedding_dim}"
             test_db = os.getenv('TEST_DB')
             
-            if test_db=='1':
-                index_name = f"story-search-{self.model.provider}-{embedding_dim}-test"
+            if test_db!='0':
+                index_name = f"story-search-{self.model.provider}-{embedding_dim}-test-{test_db}"
             # Create index if it doesn't exist - use dynamic dimension
             if index_name not in self.pc.list_indexes().names():
                 self.pc.create_index(
@@ -396,16 +407,6 @@ class StorySearchEngine:
                         region='us-east-1'
                     )
                 )
-                if test_db==1:
-                    self.pc.create_index(
-                        name=index_name,
-                        dimension=embedding_dim,
-                        metric='cosine',
-                        spec=ServerlessSpec(
-                            cloud='aws',
-                            region='us-east-1'
-                        )
-                    )
                 logger.info(f"Created Pinecone index: {index_name} with dimension {embedding_dim}")
             else:
                 # Verify existing index has correct dimension
@@ -608,7 +609,16 @@ class StorySearchEngine:
                 )
                 
                 new_stories[story_id] = story
-            
+            # import json
+            # from dataclasses import asdict
+
+            # # Convert all Story dataclass instances to dictionaries
+            # data_to_save = {story_id: asdict(story) for story_id, story in new_stories.items()}
+
+            # # Save to JSON file
+            # with open("stories.json", "w", encoding="utf-8") as f:
+            #     json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+
             # Update stories (don't replace, add to existing)
             self.stories.update(new_stories)
             logger.info(f"Total stories now: {len(self.stories)}")
@@ -633,28 +643,49 @@ class StorySearchEngine:
             vectors_to_upsert = []
             
             for story_id, story in stories_to_process.items():
-                # Create combined text for each semantic field
+            #     # Create combined text for each semantic field
+            #     for field in self.semantic_fields:
+            #         field_values = getattr(story, field)
+            #         if field_values:
+            #             combined_text = ' '.join(field_values)
+                        
+            #             # Create embedding
+            #             embedding = self.model.encode([combined_text])[0].tolist()
+                        
+            #             # Create vector ID
+            #             vector_id = f"{story_id}_{field}"
+                        
+            #             vectors_to_upsert.append({
+            #                 'id': vector_id,
+            #                 'values': embedding,
+            #                 'metadata': {
+            #                     'story_id': story_id,
+            #                     'field': field,
+            #                     'text': combined_text,
+            #                     'filename': story.filename
+            #                 }
+            #             })
                 for field in self.semantic_fields:
                     field_values = getattr(story, field)
                     if field_values:
-                        combined_text = ' '.join(field_values)
                         
                         # Create embedding
-                        embedding = self.model.encode([combined_text])[0].tolist()
-                        
-                        # Create vector ID
-                        vector_id = f"{story_id}_{field}"
-                        
-                        vectors_to_upsert.append({
-                            'id': vector_id,
-                            'values': embedding,
-                            'metadata': {
-                                'story_id': story_id,
-                                'field': field,
-                                'text': combined_text,
-                                'filename': story.filename
-                            }
-                        })
+                        embeddings = self.model.encode(field_values).tolist()
+                        # print(embeddings)
+                        for embedding_obj,value in zip(embeddings,field_values):
+                            embedding = embedding_obj.values
+
+                            vector_id = f"{story_id}_{field}__{value}"
+                            vectors_to_upsert.append({
+                                'id': vector_id,
+                                'values': embedding,
+                                'metadata': {
+                                    'story_id': story_id,
+                                    'field': field,
+                                    'text': value,
+                                    'filename': story.filename
+                                }
+                            })
             
             # Upsert in batches
             batch_size = 100
@@ -753,8 +784,9 @@ class StorySearchEngine:
         # 1. Semantic search using Pinecone (if available) or local embeddings
         if self.index:
             try:
-                query_embedding = self.model.encode([query]).tolist()[0]
-                
+                query_embedding = self.model.encode([query])
+                query_embedding = query_embedding[0].values
+
                 # Search in Pinecone with higher top_k to get more results
                 search_results = self.index.query(
                     vector=query_embedding,
@@ -762,24 +794,39 @@ class StorySearchEngine:
                     include_metadata=True
                 )
                 
+                count_dictionary = {}
+                for match in search_results['matches']:
+                    field = match['metadata']['field']
+                    if field in count_dictionary:
+                        count_dictionary[field] += 1
+                    else:
+                        count_dictionary[field] = 1
+
                 # Process semantic search results
                 for match in search_results['matches']:
                     story_id = match['metadata']['story_id']
                     field = match['metadata']['field']
                     score = match['score']
-                    
+
                     # Only include if story exists in local memory
-                    if story_id in self.stories:
+                    if story_id in self.stories and score >= 0.6:
+                        # print(story_id, field, score)
                         if story_id not in results:
                             results[story_id] = {
                                 'story': self.stories[story_id],
                                 'scores': {},
                                 'total_score': 0.0
                             }
-                        
-                        results[story_id]['scores'][field] = float(match['score'])
-                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * float(match['score'])
+                        try:
+                            results[story_id]['scores'][field] += float(match['score']) / count_dictionary[field]
+                        except:
+                            results[story_id]['scores'][field] = float(match['score']) / count_dictionary[field]
+
+                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * (float(match['score'] / count_dictionary[field]))
                 
+                        
+
+
             except Exception as e:
                 logger.error(f"Pinecone search failed: {e}")
         else:
@@ -1808,8 +1855,8 @@ def translate_to_english(text):
         """
         gemini_api_key = os.getenv('GOOGLE_API_KEY')
         model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel(model_name)
+        generative_ai.configure(api_key=gemini_api_key)
+        model = generative_ai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         translated_text = response.text.strip()
         
@@ -1830,8 +1877,8 @@ def get_font(text):
         """
         gemini_api_key = os.getenv('GOOGLE_API_KEY')
         model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel(model_name)
+        generative_ai.configure(api_key=gemini_api_key)
+        model = generative_ai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         translated_text = response.text.strip()
         
