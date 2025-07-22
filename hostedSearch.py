@@ -704,8 +704,9 @@ class StorySearchEngine:
                         # print(embeddings)
                         for embedding_obj,value in zip(embeddings,field_values):
                             embedding = embedding_obj.values
-
-                            vector_id = f"{story_id}_{field}__{value}"
+                            counter = 0
+                            vector_id = f"{story_id}_{field}__{counter}"
+                            counter += 1
                             vectors_to_upsert.append({
                                 'id': vector_id,
                                 'values': embedding,
