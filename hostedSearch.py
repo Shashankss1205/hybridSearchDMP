@@ -335,6 +335,37 @@ class SearchResult:
     score: float
     matched_fields: Dict[str, float]
 
+COLUMNS_MAP = {
+    "story_id": "filename",
+    "story_title": None,
+    "level": None,
+    "success": None,
+    "error": None,
+    "validation_errors": None,
+    "analysis_type": None,
+    "characters_primary": "character_primary",
+    "characters_secondary": "character_secondary",
+    "settings_primary": "setting_primary",
+    "settings_secondary": "setting_secondary",
+    "themes_primary": "theme_primary",
+    "themes_secondary": "theme_secondary",
+    "themes_amazon": None,
+    "events_primary": "events_primary",
+    "events_secondary": "events_secondary",
+    "emotions_primary": "emotions_primary",
+    "emotions_secondary": "emotions_secondary",
+    "keywords": "keywords",
+    "processed_at": None
+}
+
+
+def format_column(df, COLUMNS_MAP=COLUMNS_MAP):
+    
+    df.rename(columns=COLUMNS_MAP, inplace=True) 
+    df = df[list(val for val in COLUMNS_MAP.values() if val is not None)]
+    df = df.apply(lambda col: col.str.split(';').apply(lambda lst: ','.join(lst) if isinstance(lst, list) else lst))
+    return df
+
 class StorySearchEngine:
     def __init__(self):
         self.model = APIEmbeddingModel()
@@ -576,7 +607,6 @@ class StorySearchEngine:
                 # Parse from string data
                 df = pd.read_csv(io.StringIO(csv_data))
                 if 'story_id' in df.columns:
-                    from converter import format_column
                     df = format_column(df)
             elif csv_path:
                 df = pd.read_csv(csv_path)
