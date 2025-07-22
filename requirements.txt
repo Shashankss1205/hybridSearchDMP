@@ -14,3 +14,4 @@ google-generativeai
 pydub
 sarvamai
 supabase
+google-genai
