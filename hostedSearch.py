@@ -717,7 +717,7 @@ class StorySearchEngine:
                                     'filename': story.filename
                                 }
                             })
-            
+
             # Upsert in batches
             batch_size = 100
             for i in range(0, len(vectors_to_upsert), batch_size):
@@ -828,11 +828,16 @@ class StorySearchEngine:
                 count_dictionary = {}
                 for match in search_results['matches']:
                     field = match['metadata']['field']
-                    if field in count_dictionary:
-                        count_dictionary[field] += 1
+                    story_id = match['metadata']['story_id']
+                    print(story_id, field)
+                    if story_id not in count_dictionary:
+                        count_dictionary[story_id] = {}
+                    # Count occurrences of each field per story
+                    if field in count_dictionary[story_id]:
+                        count_dictionary[story_id][field] += 1
                     else:
-                        count_dictionary[field] = 1
-
+                        count_dictionary[story_id][field] = 1
+                print(count_dictionary)
                 # Process semantic search results
                 for match in search_results['matches']:
                     story_id = match['metadata']['story_id']
@@ -849,11 +854,11 @@ class StorySearchEngine:
                                 'total_score': 0.0
                             }
                         try:
-                            results[story_id]['scores'][field] += float(match['score']) / count_dictionary[field]
+                            results[story_id]['scores'][field] += float(match['score']) / count_dictionary[story_id][field]
                         except:
-                            results[story_id]['scores'][field] = float(match['score']) / count_dictionary[field]
+                            results[story_id]['scores'][field] = float(match['score']) / count_dictionary[story_id][field]
 
-                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * (float(match['score'] / count_dictionary[field]))
+                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * (float(match['score'] / count_dictionary[story_id][field]))
                 
                         
 
