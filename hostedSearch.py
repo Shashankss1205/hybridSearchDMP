@@ -458,7 +458,7 @@ class StorySearchEngine:
                     )
                     logger.info(f"Created new Pinecone index: {index_name} with dimension {embedding_dim}")
             
-            # self.index = self.pc.Index(index_name)
+            self.index = self.pc.Index(index_name)
             logger.info(f"Pinecone initialized successfully with index: {index_name}")
             
         except Exception as e:
