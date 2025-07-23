@@ -358,7 +358,6 @@ COLUMNS_MAP = {
     "processed_at": None
 }
 
-
 def format_column(df, COLUMNS_MAP=COLUMNS_MAP):
     
     df.rename(columns=COLUMNS_MAP, inplace=True) 
@@ -459,7 +458,7 @@ class StorySearchEngine:
                     )
                     logger.info(f"Created new Pinecone index: {index_name} with dimension {embedding_dim}")
             
-            self.index = self.pc.Index(index_name)
+            # self.index = self.pc.Index(index_name)
             logger.info(f"Pinecone initialized successfully with index: {index_name}")
             
         except Exception as e:
@@ -471,7 +470,8 @@ class StorySearchEngine:
         """Save stories to disk for persistence"""
         try:
             with open(self.stories_backup_file, 'wb') as f:
-                pickle.dump(self.stories, f)
+                # print(self.stories)
+                pickle.dump(dict(self.stories), f)
             logger.info(f"Saved {len(self.stories)} stories to backup file")
         except Exception as e:
             logger.error(f"Failed to save stories backup: {e}")
@@ -482,6 +482,8 @@ class StorySearchEngine:
             if os.path.exists(self.stories_backup_file):
                 with open(self.stories_backup_file, 'rb') as f:
                     self.stories = pickle.load(f)
+                    # print('|'*50)
+                    # print(self.stories)
                 logger.info(f"Loaded {len(self.stories)} stories from backup file")
             else:
                 logger.info("No backup file found")
@@ -593,7 +595,7 @@ class StorySearchEngine:
             if list_str.startswith('[') and list_str.endswith(']'):
                 return ast.literal_eval(list_str)
             
-            # Fallback: split by semi-collon
+            # Fallback: split by semi-colon
             return [item.strip().strip('"\'') for item in list_str.split(';')]
         except Exception as e:
             logger.warning(f"Failed to parse list string: {list_str}. Error: {e}")
@@ -620,7 +622,8 @@ class StorySearchEngine:
             new_stories = {}
             for idx, row in df.iterrows():
                 story_id = row['filename'].replace('.txt', '')
-                
+                # print(row['character_primary'])
+                # print(self._safe_eval_list(row['character_primary']))
                 story = Story(
                     id=story_id,
                     filename=row['filename'],
@@ -654,6 +657,13 @@ class StorySearchEngine:
             
             logger.info(f"Processed {len(self.stories)} stories")
             # Save backup
+            # print('-'*50)
+            # print(self.stories)
+            # with open("temp.json", 'w', encoding='utf-8') as f:
+            #     f.write(self.stories)
+            # json_data = json.dumps(self.stories, default=lambda o: o.__dict__, indent=2)
+            # with open("stories.json", "w", encoding="utf-8") as f:
+            #     f.write(json_data)
             self._save_stories_backup()
 
             # Create embeddings and upsert to Pinecone
@@ -824,17 +834,15 @@ class StorySearchEngine:
                     include_metadata=True
                 )
                 
-                count_dictionary = {}
+                field_argmax = {}
                 for match in search_results['matches']:
                     field = match['metadata']['field']
                     story_id = match['metadata']['story_id']
-                    if story_id not in count_dictionary:
-                        count_dictionary[story_id] = {}
-                    # Count occurrences of each field per story
-                    if field in count_dictionary[story_id]:
-                        count_dictionary[story_id][field] += 1
-                    else:
-                        count_dictionary[story_id][field] = 1
+                    if story_id not in field_argmax:
+                        field_argmax[story_id] = {}
+                    field_argmax[story_id][field] = 0
+
+
                 # Process semantic search results
                 for match in search_results['matches']:
                     story_id = match['metadata']['story_id']
@@ -850,12 +858,12 @@ class StorySearchEngine:
                                 'scores': {},
                                 'total_score': 0.0
                             }
-                        try:
-                            results[story_id]['scores'][field] += float(match['score']) / count_dictionary[story_id][field]
-                        except:
-                            results[story_id]['scores'][field] = float(match['score']) / count_dictionary[story_id][field]
+                        
+                        results[story_id]['scores'][field] = max(field_argmax[story_id][field],float(match['score']))
+                        field_argmax[story_id][field] = max(field_argmax[story_id][field],float(match['score']))
 
-                        results[story_id]['total_score'] += self.weights.get(field, 0.0) * (float(match['score'] / count_dictionary[story_id][field]))
+                        results[story_id]['total_score'] = max(results[story_id]['total_score'], results[story_id]['scores'][field])
+
                 
                         
 
