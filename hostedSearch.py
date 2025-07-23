@@ -363,7 +363,6 @@ def format_column(df, COLUMNS_MAP=COLUMNS_MAP):
     
     df.rename(columns=COLUMNS_MAP, inplace=True) 
     df = df[list(val for val in COLUMNS_MAP.values() if val is not None)]
-    df = df.apply(lambda col: col.str.split(';').apply(lambda lst: ','.join(lst) if isinstance(lst, list) else lst))
     return df
 
 class StorySearchEngine:
