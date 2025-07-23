@@ -829,7 +829,6 @@ class StorySearchEngine:
                 for match in search_results['matches']:
                     field = match['metadata']['field']
                     story_id = match['metadata']['story_id']
-                    print(story_id, field)
                     if story_id not in count_dictionary:
                         count_dictionary[story_id] = {}
                     # Count occurrences of each field per story
@@ -837,7 +836,6 @@ class StorySearchEngine:
                         count_dictionary[story_id][field] += 1
                     else:
                         count_dictionary[story_id][field] = 1
-                print(count_dictionary)
                 # Process semantic search results
                 for match in search_results['matches']:
                     story_id = match['metadata']['story_id']
