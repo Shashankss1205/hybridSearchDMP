@@ -377,10 +377,6 @@ class StorySearchEngine:
         
         # Try to load existing stories from backup
         self._load_stories_backup()
-        
-        # If no stories loaded and Pinecone is available, try to sync from Pinecone
-        # if not self.stories and self.index:
-        #     self._sync_from_pinecone()
 
         # Field weights for scoring
         self.weights = {
@@ -470,35 +466,32 @@ class StorySearchEngine:
         """Save stories to Supabase storage"""
         
         FILE_PATH = self.stories_backup_file # local path
-        anon_key = os.getenv("SUPABASE_ANON_KEY")
-        url = os.getenv("SUPABASE_URL")
-        filename = os.getenv("FILE_NAME")
         bucket = os.getenv("SUPABASE_BUCKET")
-        headers = {
-            "apikey": anon_key,
-            "Authorization": f"Bearer {anon_key}",
-            "Content-Type": "application/octet-stream"
-        }
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_ANON_KEY")
+        supabase = create_client(url, key)
 
         with open(FILE_PATH, "rb") as f:
-            file_data = f.read()
-
-        upload_url = f"{url}/storage/v1/object/{bucket}/{filename}"
-        res = requests.put(upload_url, headers=headers, data=file_data)
-
-        print(f"Upload status: {res.status_code} - {res.text}")
+            supabase.storage.from_(bucket).upload(FILE_PATH, f)
+        # print(f"Upload status: {res.status_code} - {res.text}")
+        logger.info(f"Uploaded stories to Supabase bucket {bucket} file {FILE_PATH}")   
 
     def _load_stories_supabase(self):
-        anon_key = os.getenv("SUPABASE_ANON_KEY")
         url = os.getenv("SUPABASE_URL")
-        filename = os.getenv("FILE_NAME")
+        anon_key = os.getenv("SUPABASE_ANON_KEY")
         bucket = os.getenv("SUPABASE_BUCKET")
-        download_url = f"{url}/storage/v1/object/{bucket}/{filename}"
+        FILE_PATH = self.stories_backup_file # local path        
+        # Initialize Supabase client
+        supabase = create_client(url, anon_key)
 
-        response = requests.get(download_url)
-
+        # Download file as bytes
+        response = supabase.storage.from_(bucket).download(FILE_PATH)
+        
+        # Save the downloaded content locally
         with open(self.stories_backup_file, "wb") as f:
-            f.write(response.content)
+            f.write(response)
+        logger.info(f"Loaded stories from Supabase bucket {bucket} file {FILE_PATH}")
+
 
 
     def _save_stories_backup(self):
@@ -527,95 +520,6 @@ class StorySearchEngine:
             logger.error(f"Failed to load stories backup: {e}")
             self.stories = {}
     
-    def _sync_from_pinecone(self):
-        """Rebuild stories dict from Pinecone metadata"""
-        if not self.index:
-            logger.warning("Cannot sync from Pinecone - index not available")
-            return
-        
-        try:
-            logger.info("Attempting to sync stories from Pinecone metadata...")
-            
-            # Get index stats first
-            stats = self.index.describe_index_stats()
-            total_vectors = stats.get('total_vector_count', 0)
-            logger.info(f"Found {total_vectors} vectors in Pinecone index")
-            
-            if total_vectors == 0:
-                logger.info("No vectors found in Pinecone index")
-                return
-            
-            # Query with a dummy vector to get all results
-            dummy_vector = [0.0] * self.model.dimension
-            
-            # Fetch results in batches
-            all_matches = []
-            top_k = min(10000, total_vectors)  # Pinecone limit
-            
-            query_result = self.index.query(
-                vector=dummy_vector,
-                top_k=top_k,
-                include_metadata=True
-            )
-            
-            all_matches.extend(query_result.get('matches', []))
-            
-            # Group by story_id to rebuild Story objects
-            story_data = {}
-            for match in all_matches:
-                metadata = match.get('metadata', {})
-                story_id = metadata.get('story_id')
-                
-                if not story_id:
-                    continue
-                
-                if story_id not in story_data:
-                    story_data[story_id] = {
-                        'id': story_id,
-                        'filename': metadata.get('filename', f"{story_id}.txt"),
-                        'fields': {}
-                    }
-                
-                field = metadata.get('field')
-                text = metadata.get('text', '')
-                
-                if field and text:
-                    # Convert text back to list (approximate)
-                    field_values = [item.strip() for item in text.split(' ') if item.strip()]
-                    story_data[story_id]['fields'][field] = field_values
-            
-            # Convert to Story objects
-            synced_stories = {}
-            for story_id, data in story_data.items():
-                try:
-                    story = Story(
-                        id=story_id,
-                        filename=data['filename'],
-                        character_primary=data['fields'].get('character_primary', []),
-                        character_secondary=data['fields'].get('character_secondary', []),
-                        setting_primary=data['fields'].get('setting_primary', []),
-                        setting_secondary=data['fields'].get('setting_secondary', []),
-                        theme_primary=data['fields'].get('theme_primary', []),
-                        theme_secondary=data['fields'].get('theme_secondary', []),
-                        events_primary=data['fields'].get('events_primary', []),
-                        events_secondary=data['fields'].get('events_secondary', []),
-                        emotions_primary=data['fields'].get('emotions_primary', []),
-                        emotions_secondary=data['fields'].get('emotions_secondary', []),
-                        keywords=data['fields'].get('keywords', [])
-                    )
-                    synced_stories[story_id] = story
-                except Exception as e:
-                    logger.warning(f"Failed to create story object for {story_id}: {e}")
-            
-            if synced_stories:
-                self.stories = synced_stories
-                self._save_stories_backup()  # Save the synced data
-                logger.info(f"Successfully synced {len(self.stories)} stories from Pinecone")
-            else:
-                logger.warning("No valid stories could be synced from Pinecone")
-                
-        except Exception as e:
-            logger.error(f"Failed to sync from Pinecone: {e}")
     
     def _safe_eval_list(self, list_str: str) -> List[str]:
         """Safely evaluate string representation of list"""
@@ -1134,16 +1038,6 @@ HTML_TEMPLATE = r"""
                 </button>
             </form>
 
-            <!-- Sync from Pinecone Button -->
-            <div class="mt-4 pt-4 border-t border-gray-200">
-                <button id="sync-btn" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center text-sm">
-                    <svg id="sync-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                    </svg>
-                    <span id="sync-text">Sync from Pinecone</span>
-                </button>
-                <p class="text-xs text-gray-500 mt-1">Load stories from existing Pinecone vectors if available</p>
-            </div>
         </div>
 
         <!-- CSV Schema Documentation -->
@@ -1455,7 +1349,7 @@ HTML_TEMPLATE = r"""
                                     <div class="flex items-center justify-between">
                                         <span class="text-xs text-gray-500">Help us improve our recommendations</span>
                                         <button 
-                                            onclick="submitFeedback('${story.id}', '${encodeURIComponent(currentQuery)}', ${index}, event)"
+                                            onclick="submitFeedback('${story.id}', '${currentQuery}', ${index}, event)"
                                             class="px-4 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors"
                                         >
                                             Submit Feedback
@@ -1641,38 +1535,6 @@ HTML_TEMPLATE = r"""
             }, 3000);
         }
 
-
-        async function syncFromPinecone() {
-            if (isSyncing) return;
-            
-            isSyncing = true;
-            syncBtn.disabled = true;
-            syncIcon.classList.add('loading');
-            syncText.textContent = 'Syncing...';
-            hideError();
-
-            try {
-                const response = await fetch('/sync', {
-                    method: 'POST',
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Sync failed: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-                alert(`Success! ${data.stories_synced} stories synced from Pinecone.`);
-                checkHealth(); // Refresh health status
-                
-            } catch (error) {
-                showError(error.message);
-            } finally {
-                isSyncing = false;
-                syncBtn.disabled = false;
-                syncIcon.classList.remove('loading');
-                syncText.textContent = 'Sync from Pinecone';
-            }
-        }
 
         // Event listeners
         searchForm.addEventListener('submit', (e) => {
@@ -2138,26 +2000,6 @@ def voice_search():
         logger.error(f"Voice search error: {e}")
         return jsonify({'error': 'Voice search failed'}), 500
 
-@app.route('/sync', methods=['POST'])
-def sync_from_pinecone():
-    """Sync stories from Pinecone"""
-    try:
-        if not search_engine.index:
-            return jsonify({'error': 'Pinecone not connected'}), 400
-        
-        stories_before = len(search_engine.stories)
-        search_engine._sync_from_pinecone()
-        stories_after = len(search_engine.stories)
-        
-        return jsonify({
-            'message': 'Sync completed successfully',
-            'stories_synced': stories_after - stories_before,
-            'total_stories': stories_after
-        })
-        
-    except Exception as e:
-        logger.error(f"Sync error: {e}")
-        return jsonify({'error': 'Failed to sync from Pinecone'}), 500
 
 @app.route('/delete-stories', methods=['POST'])
 def delete_stories():
