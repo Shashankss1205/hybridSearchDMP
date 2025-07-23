@@ -589,13 +589,13 @@ class StorySearchEngine:
             # Handle the case where it's already a list
             if isinstance(list_str, list):
                 return list_str
-            
+             
             # Try to parse as JSON first
             if list_str.startswith('[') and list_str.endswith(']'):
                 return ast.literal_eval(list_str)
             
-            # Fallback: split by comma
-            return [item.strip().strip('"\'') for item in list_str.split(',')]
+            # Fallback: split by semi-collon
+            return [item.strip().strip('"\'') for item in list_str.split(';')]
         except Exception as e:
             logger.warning(f"Failed to parse list string: {list_str}. Error: {e}")
             return []
@@ -1035,7 +1035,7 @@ search_engine = StorySearchEngine()
 voice_handler = VoiceHandler()
 
 # HTML Template
-HTML_TEMPLATE = """
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
