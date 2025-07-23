@@ -379,8 +379,8 @@ class StorySearchEngine:
         self._load_stories_backup()
         
         # If no stories loaded and Pinecone is available, try to sync from Pinecone
-        if not self.stories and self.index:
-            self._sync_from_pinecone()
+        # if not self.stories and self.index:
+        #     self._sync_from_pinecone()
 
         # Field weights for scoring
         self.weights = {
@@ -466,24 +466,52 @@ class StorySearchEngine:
             self.pc = None
             self.index = None
     
+    def _save_stories_supabase(self):
+        """Save stories to Supabase storage"""
+        
+        FILE_PATH = self.stories_backup_file # local path
+        headers = {
+            "apikey": os.getenv("SUPABASE_ANON_KEY"),
+            "Authorization": f"Bearer {os.getenv("SUPABASE_ANON_KEY")}",
+            "Content-Type": "application/octet-stream"
+        }
+
+        with open(FILE_PATH, "rb") as f:
+            file_data = f.read()
+
+        upload_url = f"{os.getenv("SUPABASE_URL")}/storage/v1/object/{os.getenv("SUPABASE_BUCKET")}/{os.getenv("FILE_NAME")}"
+        res = requests.put(upload_url, headers=headers, data=file_data)
+
+        print(f"Upload status: {res.status_code} - {res.text}")
+
+    def _load_stories_supabase(self):
+        download_url = f"{os.getenv("SUPABASE_URL")}/storage/v1/object/{os.getenv("SUPABASE_BUCKET")}/{os.getenv("FILE_NAME")}"
+
+        response = requests.get(download_url)
+
+        with open(self.stories_backup_file, "wb") as f:
+            f.write(response.content)
+
+
     def _save_stories_backup(self):
         """Save stories to disk for persistence"""
         try:
             with open(self.stories_backup_file, 'wb') as f:
-                # print(self.stories)
                 pickle.dump(dict(self.stories), f)
             logger.info(f"Saved {len(self.stories)} stories to backup file")
+            
+            self._save_stories_supabase()
         except Exception as e:
             logger.error(f"Failed to save stories backup: {e}")
     
     def _load_stories_backup(self):
         """Load stories from disk backup"""
         try:
+            self._load_stories_supabase()
             if os.path.exists(self.stories_backup_file):
                 with open(self.stories_backup_file, 'rb') as f:
                     self.stories = pickle.load(f)
-                    # print('|'*50)
-                    # print(self.stories)
+
                 logger.info(f"Loaded {len(self.stories)} stories from backup file")
             else:
                 logger.info("No backup file found")
@@ -612,6 +640,8 @@ class StorySearchEngine:
             elif csv_path:
                 df = pd.read_csv(csv_path)
                 df = df[~df.isin(['Error parsing','Error']).any(axis=1)]
+                if 'story_id' in df.columns:
+                    df = format_column(df)
 
             else:
                 raise ValueError("Either csv_path or csv_data must be provided")
