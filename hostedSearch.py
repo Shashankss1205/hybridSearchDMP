@@ -470,22 +470,30 @@ class StorySearchEngine:
         """Save stories to Supabase storage"""
         
         FILE_PATH = self.stories_backup_file # local path
+        anon_key = os.getenv("SUPABASE_ANON_KEY")
+        url = os.getenv("SUPABASE_URL")
+        filename = os.getenv("FILE_NAME")
+        bucket = os.getenv("SUPABASE_BUCKET")
         headers = {
-            "apikey": os.getenv("SUPABASE_ANON_KEY"),
-            "Authorization": f"Bearer {os.getenv("SUPABASE_ANON_KEY")}",
+            "apikey": anon_key,
+            "Authorization": f"Bearer {anon_key}",
             "Content-Type": "application/octet-stream"
         }
 
         with open(FILE_PATH, "rb") as f:
             file_data = f.read()
 
-        upload_url = f"{os.getenv("SUPABASE_URL")}/storage/v1/object/{os.getenv("SUPABASE_BUCKET")}/{os.getenv("FILE_NAME")}"
+        upload_url = f"{url}/storage/v1/object/{bucket}/{filename}"
         res = requests.put(upload_url, headers=headers, data=file_data)
 
         print(f"Upload status: {res.status_code} - {res.text}")
 
     def _load_stories_supabase(self):
-        download_url = f"{os.getenv("SUPABASE_URL")}/storage/v1/object/{os.getenv("SUPABASE_BUCKET")}/{os.getenv("FILE_NAME")}"
+        anon_key = os.getenv("SUPABASE_ANON_KEY")
+        url = os.getenv("SUPABASE_URL")
+        filename = os.getenv("FILE_NAME")
+        bucket = os.getenv("SUPABASE_BUCKET")
+        download_url = f"{url}/storage/v1/object/{bucket}/{filename}"
 
         response = requests.get(download_url)
 
