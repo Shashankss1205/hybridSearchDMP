@@ -746,9 +746,9 @@ class StorySearchEngine:
                         # Create embedding
                         embeddings = self.model.encode(field_values).tolist()
                         # print(embeddings)
+                        counter = 0
                         for embedding_obj,value in zip(embeddings,field_values):
                             embedding = embedding_obj.values
-                            counter = 0
                             vector_id = f"{story_id}_{field}__{counter}"
                             counter += 1
                             vectors_to_upsert.append({
@@ -893,7 +893,9 @@ class StorySearchEngine:
                                 'scores': {},
                                 'total_score': 0.0
                             }
-                        
+                        if story_id == "joyful-540838-chasing-the-rain":
+                            print(f"Match found: {story_id} {field} {score}")
+                            print(match)
                         results[story_id]['scores'][field] = max(field_argmax[story_id][field],float(match['score']))
                         field_argmax[story_id][field] = max(field_argmax[story_id][field],float(match['score']))
 
