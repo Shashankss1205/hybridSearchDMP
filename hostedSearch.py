@@ -34,7 +34,7 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+logging.getLogger("httpx").setLevel(logging.WARNING)
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder for numpy types"""
     def default(self, obj):
@@ -716,7 +716,7 @@ class StorySearchEngine:
                 stories_to_process = self.stories
             vectors_to_upsert = []
             
-            for story_id, story in stories_to_process.items():
+            # for story_id, story in stories_to_process.items():
             #     # Create combined text for each semantic field
             #     for field in self.semantic_fields:
             #         field_values = getattr(story, field)
@@ -739,28 +739,60 @@ class StorySearchEngine:
             #                     'filename': story.filename
             #                 }
             #             })
+            # for story_id, story in stories_to_process.items():
+            #     for field in self.semantic_fields:
+            #         field_values = getattr(story, field)
+            #         if field_values:
+            #             # Create embedding
+            #             embeddings = self.model.encode(field_values).tolist()
+            #             # print(embeddings)
+            #             counter = 0
+            #             for embedding_obj,value in zip(embeddings,field_values):
+            #                 embedding = embedding_obj.values
+            #                 vector_id = f"{story_id}_{field}__{counter}"
+            #                 counter += 1
+            #                 vectors_to_upsert.append({
+            #                     'id': vector_id,
+            #                     'values': embedding,
+            #                     'metadata': {
+            #                         'story_id': story_id,
+            #                         'field': field,
+            #                         'text': value,
+            #                         'filename': story.filename
+            #                     }
+            #                 })
+
+            story_counter=1
+            for story_id, story in stories_to_process.items():
+                logger.info(f"Processing story {story_id} ({story_counter}/{len(stories_to_process)})")
+                story_counter += 1
+                all_field_values = []
                 for field in self.semantic_fields:
                     field_values = getattr(story, field)
                     if field_values:
-                        
-                        # Create embedding
-                        embeddings = self.model.encode(field_values).tolist()
-                        # print(embeddings)
-                        counter = 0
-                        for embedding_obj,value in zip(embeddings,field_values):
-                            embedding = embedding_obj.values
-                            vector_id = f"{story_id}_{field}__{counter}"
-                            counter += 1
-                            vectors_to_upsert.append({
-                                'id': vector_id,
-                                'values': embedding,
-                                'metadata': {
-                                    'story_id': story_id,
-                                    'field': field,
-                                    'text': value,
-                                    'filename': story.filename
-                                }
-                            })
+                        for i, value in enumerate(field_values):
+                            all_field_values.append([value, field])
+                if not all_field_values:
+                    logger.warning(f"No semantic fields found for story {story_id}, skipping")
+                    continue
+                # Create embedding
+                embeddings = self.model.encode([sublist[0] for sublist in all_field_values]).tolist()
+                # print(embeddings)
+                counter = 0
+                for embedding_obj,value_field_pair in zip(embeddings,all_field_values):
+                    embedding = embedding_obj.values
+                    vector_id = f"{story_id}_{value_field_pair[1]}__{counter}"
+                    counter += 1
+                    vectors_to_upsert.append({
+                        'id': vector_id,
+                        'values': embedding,
+                        'metadata': {
+                            'story_id': story_id,
+                            'field': value_field_pair[1],
+                            'text': value_field_pair[0],
+                            'filename': story.filename
+                        }
+                    })
 
             # Upsert in batches
             batch_size = 100
