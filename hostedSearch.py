@@ -24,7 +24,6 @@ import pickle
 from sarvamai import SarvamAI
 # import sqlite3
 from datetime import datetime
-# import threading
 from supabase import create_client, Client
 from google import genai
 
@@ -94,6 +93,43 @@ class NumpyEncoder(json.JSONEncoder):
 #             logger.error(f"Gemini enhancement error: {e}")
 #             return voice_query
     
+# import re
+
+# def refine_semantic_query(query: str) -> str:
+#     """
+#     Cleans a user search query by removing story-related conversational phrases and generic keywords.
+
+#     Args:
+#         query (str): Raw user input.
+
+#     Returns:
+#         str: Refined search query.
+#     """
+#     query = query.strip().lower()
+
+#     # Conversational patterns
+#     phrase_patterns = [
+#         r'^(tell|show|give|find|bring|recommend|suggest)\s+(me\s+)?(a|some)?\s*(story|stories|tale|tales|book|books|novel|novels)?\s*(of|about|on)?\s*',
+#         r'^(a|some)?\s*(story|stories|tale|tales|book|books|novel|novels)?\s*(of|about|on)?\s*',
+#         r'^(about|on|of)\s+'
+#     ]
+
+#     # Remove prefix phrases
+#     for pattern in phrase_patterns:
+#         query = re.sub(pattern, '', query)
+
+#     # Remove generic words anywhere
+#     generic_words = ['story', 'stories', 'tale', 'tales', 'book', 'books', 'novel', 'novels']
+#     word_pattern = r'\b(?:' + '|'.join(generic_words) + r')\b'
+#     query = re.sub(word_pattern, '', query)
+
+#     # Cleanup extra whitespace
+#     query = re.sub(r'\s+', ' ', query).strip()
+
+#     return query
+
+
+
 class VoiceHandler:
     """Handle speech-to-text using SarvamAI Saarika (v2.5)"""
 
@@ -495,8 +531,6 @@ class StorySearchEngine:
         with open(self.stories_backup_file, "wb") as f:
             f.write(response)
         logger.info(f"Loaded stories from Supabase bucket {bucket} file {FILE_PATH}")
-
-
 
     def _save_stories_backup(self):
         """Save stories to disk for persistence"""
@@ -918,6 +952,8 @@ class StorySearchEngine:
 
                     # Only include if story exists in local memory
                     if story_id in self.stories and score >= 0.6:
+                        if match['score'] >= 0.7:
+                            print(match)
                         # print(story_id, field, score)
                         if story_id not in results:
                             results[story_id] = {
@@ -925,9 +961,6 @@ class StorySearchEngine:
                                 'scores': {},
                                 'total_score': 0.0
                             }
-                        if story_id == "joyful-540838-chasing-the-rain":
-                            print(f"Match found: {story_id} {field} {score}")
-                            print(match)
                         results[story_id]['scores'][field] = max(field_argmax[story_id][field],float(match['score']))
                         field_argmax[story_id][field] = max(field_argmax[story_id][field],float(match['score']))
 
@@ -1384,6 +1417,19 @@ HTML_TEMPLATE = r"""
             return icons[fieldName] || '📖';
         }
 
+        function extractStoryId(storyId) {
+            if (storyId.startsWith('data-')) {
+                return storyId.substring(5);  // Removes 'data-'
+            } else if (storyId.startsWith('Joyful-')) {
+                return storyId.substring(7);
+            } else {
+                return storyId;  // Return as is if no match
+            }
+        }
+
+
+
+
         function renderResults(results, currentQuery = '') {
             if (!results || results.length === 0) {
                 resultsSection.classList.add('hidden');
@@ -1447,7 +1493,10 @@ HTML_TEMPLATE = r"""
                                 <div class="flex-1">
                                     <h3 class="text-xl font-bold text-gray-900 mb-2">${title}</h3>
                                     <div class="flex items-center space-x-4 text-sm text-gray-500">
-                                        <span>ID: ${story.id || 'N/A'}</span>
+                                    <a href="https://storyweaver.org.in/en/stories/${extractStoryId(story.id)}?mode=read" target="_blank" class="hover:underline text-blue-600">
+                                            Link to StoryID: ${extractStoryId(story.id) || 'N/A'}
+                                        </a>
+
                                         <span class="px-2 py-1 rounded-full text-xs font-medium ${getScoreColor(result.score || 0)}">
                                             Match Score: ${((result.score || 0) * 100).toFixed(1)}%
                                         </span>
@@ -1977,6 +2026,64 @@ def translate_to_english(text):
         # Return original text if translation fails
         return text, 'unknown'
     
+import os
+import logging
+import google.generativeai as generative_ai
+
+def translate_and_refine(text):
+    """
+    Use Gemini to:
+    1. Translate input to English if necessary.
+    2. Strip any story-related phrases like 'story of', 'book about', etc.
+    3. Return only the refined, meaningful core query.
+
+    Returns:
+        str: Cleaned and translated query suitable for search.
+    """
+    try:
+        prompt = f"""
+You are a query cleaning assistant for a story search engine.
+
+Instructions:
+- Translate the input to English if it is in a different language.
+- Then, remove common filler or generic phrases related to stories or requests. This includes:
+  "story of", "stories about", "a tale on", "book of", "novel about",
+  as well as conversational prefixes like "tell me", "give me", "show me", "I want a story about", etc.
+- Only return the essential topic or subject of the story in a short phrase.
+- Do not repeat or rephrase the original structure.
+- Do not include extra words like "a", "the", "story", "book", etc.
+- DO NOT explain or describe anything — just return the final cleaned phrase.
+
+Examples:
+Input: "Tell me a story of teenagers"  
+Output: teenagers
+
+Input: "Muéstrame una historia sobre la valentía"  
+Output: bravery
+
+Input: "Give me a novel about freedom fighters"  
+Output: freedom fighters
+
+Input: "A tale on friendship and loss"  
+Output: friendship and loss
+
+Now process this:
+{text}
+"""
+
+        # Gemini setup
+        gemini_api_key = os.getenv('GOOGLE_API_KEY')
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+        generative_ai.configure(api_key=gemini_api_key)
+        model = generative_ai.GenerativeModel(model_name)
+
+        response = model.generate_content(prompt)
+        return response.text.strip()
+
+    except Exception as e:
+        logging.error(f"Gemini API error: {e}")
+        return text.strip()
+
 def get_font(text):
     """Translate text to English using Gemini"""
     try:
@@ -2016,7 +2123,9 @@ def search_stories():
         
         
         # Perform search
-        query = translate_to_english(query)
+        # query = translate_to_english(query)
+        # query = refine_semantic_query(query)
+        query = translate_and_refine(query)
         print(f"Search query: {query}")
         results = search_engine.search(query, top_k)
         
