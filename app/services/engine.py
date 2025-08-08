@@ -180,6 +180,11 @@ class StorySearchEngine:
         try:
             self._load_stories_supabase()
             if os.path.exists(self.stories_backup_file):
+                # Override pickle's default behavior to look for Story class in __main__
+                from ..models import Story  # importing here to make sure it's available
+                import sys
+                sys.modules['__main__'].Story = Story
+                
                 with open(self.stories_backup_file, "rb") as f:
                     self.stories = pickle.load(f)
                 logger.info("Loaded %s stories from backup", len(self.stories))
