@@ -15,3 +15,5 @@ pydub
 sarvamai
 supabase
 google-genai
+pytest
+pytest-cov

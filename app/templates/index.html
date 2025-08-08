@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Story Search Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loading { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div class="max-w-6xl mx-auto px-4 py-8">
+        <div class="text-center mb-8">
+            <div class="flex items-center justify-center mb-4">
+                <svg class="w-12 h-12 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                </svg>
+                <h1 class="text-4xl font-bold text-gray-900">Story Search Engine</h1>
+            </div>
+            <p class="text-xl text-gray-600">Find the perfect story using AI-powered semantic search</p>
+            <div id="api-status" class="inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4">
+                <div id="status-indicator" class="w-2 h-2 rounded-full mr-2"></div>
+                <span id="status-text">Checking API...</span>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <h2 class="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                </svg>
+                Upload Story Data
+            </h2>
+            <form id="upload-form" class="flex items-center space-x-4">
+                <div class="flex-1">
+                    <input type="file" id="csv-file" accept=".csv" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                </div>
+                <button type="submit" id="upload-btn" disabled class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center">
+                    <svg id="upload-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <span id="upload-text">Upload CSV</span>
+                </button>
+            </form>
+            <div class="mt-4 pt-4 border-t border-gray-200">
+                <button id="sync-btn" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center text-sm">
+                    <svg id="sync-icon" class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span id="sync-text">Sync from Pinecone</span>
+                </button>
+                <p class="text-xs text-gray-500 mt-1">Load stories from existing Pinecone vectors if available</p>
+            </div>
+        </div>
+
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+            <h3 class="text-lg font-semibold text-blue-900 mb-2">CSV Schema Required</h3>
+            <p class="text-sm text-blue-800 mb-2">Your CSV file must contain these exact columns:</p>
+            <div class="grid grid-cols-2 gap-4 text-xs">
+                <div>
+                    <strong>Required Columns:</strong>
+                    <ul class="list-disc list-inside text-blue-700 mt-1">
+                        <li>filename</li>
+                        <li>character_primary</li>
+                        <li>character_secondary</li>
+                        <li>setting_primary</li>
+                        <li>setting_secondary</li>
+                        <li>theme_primary</li>
+                        <li>theme_secondary</li>
+                    </ul>
+                </div>
+                <div>
+                    <strong>Additional Columns:</strong>
+                    <ul class="list-disc list-inside text-blue-700 mt-1">
+                        <li>events_primary</li>
+                        <li>events_secondary</li>
+                        <li>emotions_primary</li>
+                        <li>emotions_secondary</li>
+                        <li>keywords</li>
+                    </ul>
+                </div>
+            </div>
+            <p class="text-xs text-blue-600 mt-2">
+                <strong>Format:</strong> List fields should be formatted as Python lists: <code>["item1", "item2", "item3"]</code>
+            </p>
+        </div>
+
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <form id="search-form" class="space-y-4">
+                <div class="flex items-center space-x-4">
+                    <div class="flex-1 relative">
+                        <svg class="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                        <input type="text" id="search-input" placeholder="Search for stories... (e.g., 'friendship underwater animals', 'robot school adventure')" class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg">
+                    </div>
+                    <button type="submit" id="search-btn" class="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center text-lg font-medium">
+                        <svg id="search-icon" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                        <span id="search-text">Search</span>
+                    </button>
+                </div>
+            </form>
+
+            <div class="mt-4 flex items-center justify-center space-x-4">
+                <button id="voice-search-btn" class="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg id="voice-icon" class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                    </svg>
+                    <span id="voice-text">Voice Search</span>
+                </button>
+                
+                <button id="view-feedback-btn" class="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-1.586l-4.707 4.707z"></path>
+                    </svg>
+                    View All Feedback
+                </button>
+                <button id="delete-stories-btn" class="flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                    </svg>
+                    Delete Stories
+                </button>
+            </div>
+
+            <input type="file" id="audio-input" accept="audio/*" style="display: none;">
+
+            <div class="mt-4">
+                <p class="text-sm text-gray-600 mb-2">Try these example searches:</p>
+                <div class="flex flex-wrap gap-2">
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="friendship underwater animals">friendship underwater animals</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="robot artificial intelligence school">robot artificial intelligence school</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="adventure jungle betrayal">adventure jungle betrayal</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="fear anxiety emotions">fear anxiety emotions</button>
+                    <button class="example-btn px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-full hover:bg-gray-200 transition-colors" data-query="children magic fairy tale">children magic fairy tale</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="error-display" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-center">
+            <svg class="w-5 h-5 text-red-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span id="error-text" class="text-red-700"></span>
+        </div>
+
+        <div id="results-section" class="hidden space-y-6">
+            <h2 class="text-2xl font-semibold text-gray-900 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                </svg>
+                Search Results (<span id="results-count">0</span>)
+            </h2>
+            <div id="results-container"></div>
+        </div>
+
+        <div id="no-results" class="hidden text-center py-12">
+            <svg class="w-16 h-16 text-gray-300 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+            </svg>
+            <h3 class="text-xl font-medium text-gray-900 mb-2">No stories found</h3>
+            <p class="text-gray-600">Try different keywords or upload more story data</p>
+        </div>
+
+        <footer class="mt-16 text-center text-gray-500 text-sm">
+            <p>Story Search Engine powered by Sentence Transformers and Pinecone</p>
+        </footer>
+    </div>
+
+    <script>
+        let isSearching = false;
+        let isUploading = false;
+        let isSyncing = false;
+        const searchForm = document.getElementById('search-form');
+        const searchInput = document.getElementById('search-input');
+        const searchBtn = document.getElementById('search-btn');
+        const searchIcon = document.getElementById('search-icon');
+        const searchText = document.getElementById('search-text');
+        const uploadForm = document.getElementById('upload-form');
+        const csvFileInput = document.getElementById('csv-file');
+        const uploadBtn = document.getElementById('upload-btn');
+        const uploadIcon = document.getElementById('upload-icon');
+        const uploadText = document.getElementById('upload-text');
+        const syncBtn = document.getElementById('sync-btn');
+        const syncIcon = document.getElementById('sync-icon');
+        const syncText = document.getElementById('sync-text');
+        const errorDisplay = document.getElementById('error-display');
+        const errorText = document.getElementById('error-text');
+        const resultsSection = document.getElementById('results-section');
+        const resultsContainer = document.getElementById('results-container');
+        const resultsCount = document.getElementById('results-count');
+        const noResults = document.getElementById('no-results');
+        const apiStatus = document.getElementById('api-status');
+        const statusIndicator = document.getElementById('status-indicator');
+        const statusText = document.getElementById('status-text');
+
+        function showError(message) {
+            errorText.textContent = message;
+            errorDisplay.classList.remove('hidden');
+            setTimeout(() => { errorDisplay.classList.add('hidden'); }, 5000);
+        }
+        function hideError() { errorDisplay.classList.add('hidden'); }
+        function updateApiStatus(status) {
+            if (status.status === 'healthy') {
+                apiStatus.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4 bg-green-100 text-green-800';
+                statusIndicator.className = 'w-2 h-2 rounded-full mr-2 bg-green-400';
+                statusText.textContent = `API: ${status.status} | Stories: ${status.stories_loaded || 0} | Pinecone: ${status.pinecone_connected ? 'Connected' : 'Disconnected'}`;
+            } else {
+                apiStatus.className = 'inline-flex items-center px-4 py-2 rounded-full text-sm font-medium mt-4 bg-red-100 text-red-800';
+                statusIndicator.className = 'w-2 h-2 rounded-full mr-2 bg-red-400';
+                statusText.textContent = `API: ${status.status || 'unhealthy'}`;
+            }
+        }
+        function getScoreColor(score) {
+            if (score >= 0.8) return 'text-green-600 bg-green-50';
+            if (score >= 0.6) return 'text-blue-600 bg-blue-50';
+            if (score >= 0.4) return 'text-yellow-600 bg-yellow-50';
+            return 'text-gray-600 bg-gray-50';
+        }
+        function formatFieldName(fieldName) { return fieldName.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()); }
+        function getFieldIcon(fieldName) {
+            const icons = { character_primary: '👥', character_secondary: '👤', setting_primary: '📍', setting_secondary: '🗺️', theme_primary: '⭐', theme_secondary: '✨', emotions_primary: '❤️', emotions_secondary: '💭', events_primary: '⚡', events_secondary: '🔸', keywords: '📚' };
+            return icons[fieldName] || '📖';
+        }
+        function extractStoryId(storyId) {
+            if (storyId.startsWith('data-')) return storyId.substring(5);
+            if (storyId.startsWith('Joyful-')) return storyId.substring(7);
+            return storyId;
+        }
+
+        function renderResults(results, currentQuery = '') {
+            if (!results || results.length === 0) { resultsSection.classList.add('hidden'); noResults.classList.remove('hidden'); return; }
+            noResults.classList.add('hidden');
+            resultsSection.classList.remove('hidden');
+            resultsCount.textContent = results.length;
+            resultsContainer.innerHTML = results.map((result, index) => {
+                const story = result.story;
+                const filename = story.filename || 'Unknown Story';
+                const title = filename.replace('.txt', '').replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                const storyFields = Object.entries(story).filter(([key, value]) => key !== 'id' && key !== 'filename' && Array.isArray(value) && value.length > 0);
+                const fieldHtml = storyFields.map(([fieldName, fieldValues]) => {
+                    const icon = getFieldIcon(fieldName);
+                    const displayValues = fieldValues;
+                    const remainingCount = fieldValues;
+                    return `
+                        <div class="bg-gray-50 rounded-lg p-3">
+                            <div class="flex items-center mb-2">
+                                <span class="mr-2">${icon}</span>
+                                <span class="text-sm font-medium text-gray-700">${formatFieldName(fieldName)}</span>
+                            </div>
+                            <div class="space-y-1">
+                                ${displayValues.map(value => `<span class="inline-block bg-white px-2 py-1 text-xs text-gray-600 rounded mr-1 mb-1">${value}</span>`).join('')}
+                                ${remainingCount > 0 ? `<span class="inline-block bg-gray-200 px-2 py-1 text-xs text-gray-500 rounded">+${remainingCount} more</span>` : ''}
+                            </div>
+                        </div>`;
+                }).join('');
+                const scoreHtml = result.matched_fields ? Object.entries(result.matched_fields).filter(([, s]) => s > 0).sort(([, a], [, b]) => b - a).map(([field, s]) => `
+                    <div class="px-2 py-1 rounded text-xs text-center ${getScoreColor(s)}">
+                        <div class="font-medium">${formatFieldName(field)}</div>
+                        <div>${(s * 100).toFixed(0)}%</div>
+                    </div>`).join('') : '';
+                return `
+                    <div class="bg-white rounded-xl shadow-lg overflow-hidden fade-in">
+                        <div class="p-6">
+                            <div class="flex items-start justify-between mb-4">
+                                <div class="flex-1">
+                                    <h3 class="text-xl font-bold text-gray-900 mb-2">${title}</h3>
+                                    <div class="flex items-center space-x-4 text-sm text-gray-500">
+                                        <a href="https://storyweaver.org.in/en/stories/${extractStoryId(story.id)}?mode=read" target="_blank" class="hover:underline text-blue-600">Link to StoryID: ${extractStoryId(story.id) || 'N/A'}</a>
+                                        <span class="px-2 py-1 rounded-full text-xs font-medium ${getScoreColor(result.score || 0)}">Match Score: ${((result.score || 0) * 100).toFixed(1)}%</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">${fieldHtml}</div>
+                            ${scoreHtml ? `<div class="border-t pt-4 mb-4"><h4 class="text-sm font-medium text-gray-700 mb-2">Field Match Scores</h4><div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">${scoreHtml}</div></div>` : ''}
+                            <div class="border-t pt-4">
+                                <h4 class="text-sm font-medium text-gray-700 mb-3 flex items-center">
+                                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-1.586l-4.707 4.707z"></path>
+                                    </svg>
+                                    Share your feedback
+                                </h4>
+                                <div class="space-y-2">
+                                    <textarea id="feedback-${story.id}" placeholder="How well does this story match your search? Any suggestions for improvement?" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm resize-none" rows="2"></textarea>
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-xs text-gray-500">Help us improve our recommendations</span>
+                                        <button onclick="submitFeedback('${story.id}', '${currentQuery}', ${index}, event)" class="px-4 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors">Submit Feedback</button>
+                                    </div>
+                                </div>
+                                <div id="feedback-status-${story.id}" class="mt-2 hidden">
+                                    <div class="flex items-center text-xs text-green-600">
+                                        <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                        </svg>
+                                        Thank you for your feedback!
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+            }).join('');
+        }
+
+        async function checkHealth() { try { const r = await fetch('/health'); updateApiStatus(await r.json()); } catch (e) { updateApiStatus({ status: 'unhealthy', error: e.message }); } }
+        async function performSearch(query) {
+            if (isSearching) return; isSearching = true; searchBtn.disabled = true; searchIcon.classList.add('loading'); searchText.textContent = 'Searching...'; hideError();
+            try {
+                const r = await fetch('/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: query.trim(), top_k: 20 }) });
+                if (!r.ok) throw new Error(`Search failed: ${r.statusText}`);
+                const data = await r.json(); renderResults(data.results || [], query);
+            } catch (e) { showError(e.message); renderResults([]); }
+            finally { isSearching = false; searchBtn.disabled = false; searchIcon.classList.remove('loading'); searchText.textContent = 'Search'; }
+        }
+        async function uploadFile(file) {
+            if (isUploading) return; isUploading = true; uploadBtn.disabled = true; uploadIcon.classList.add('loading'); uploadText.textContent = 'Uploading...'; hideError();
+            try { const fd = new FormData(); fd.append('file', file); const r = await fetch('/upload', { method: 'POST', body: fd }); if (!r.ok) throw new Error(`Upload failed: ${r.statusText}`); const data = await r.json(); alert(`Success! ${data.stories_loaded} stories loaded.`); csvFileInput.value=''; checkHealth(); }
+            catch (e) { showError(e.message); }
+            finally { isUploading = false; uploadBtn.disabled = !csvFileInput.files[0]; uploadIcon.classList.remove('loading'); uploadText.textContent = 'Upload CSV'; }
+        }
+        async function submitFeedback(storyId, query, resultIndex, event) {
+            const button = event.target; const originalText = button.textContent;
+            try { const textarea = document.getElementById(`feedback-${storyId}`); const statusDiv = document.getElementById(`feedback-status-${storyId}`); const feedback = textarea.value.trim(); if (!feedback) { showError('Please enter your feedback before submitting'); return; } button.disabled = true; button.textContent = 'Submitting...'; const r = await fetch('/submit-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, story_id: storyId, feedback }) }); if (!r.ok) throw new Error('Failed to submit feedback'); textarea.value = ''; textarea.disabled = true; button.style.display = 'none'; statusDiv.classList.remove('hidden'); showSuccess('Feedback submitted successfully!'); }
+            catch (e) { showError('Failed to submit feedback: ' + e.message); button.disabled = false; button.textContent = originalText; }
+        }
+        function showSuccess(message) {
+            let successDisplay = document.getElementById('success-display');
+            if (!successDisplay) { successDisplay = document.createElement('div'); successDisplay.id = 'success-display'; successDisplay.className = 'fixed top-4 right-4 bg-green-50 border border-green-200 rounded-lg p-4 flex items-center z-50 shadow-lg'; successDisplay.innerHTML = `<svg class="w-5 h-5 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg><span id="success-text" class="text-green-700"></span>`; document.body.appendChild(successDisplay); }
+            document.getElementById('success-text').textContent = message; successDisplay.classList.remove('hidden'); setTimeout(() => { successDisplay.classList.add('hidden'); }, 3000);
+        }
+        async function syncFromPinecone() {
+            if (isSyncing) return; isSyncing = true; syncBtn.disabled = true; syncIcon.classList.add('loading'); syncText.textContent = 'Syncing...'; hideError();
+            try { const r = await fetch('/sync', { method: 'POST' }); if (!r.ok) throw new Error(`Sync failed: ${r.statusText}`); const data = await r.json(); alert(`Success! ${data.stories_synced} stories synced from Pinecone.`); checkHealth(); }
+            catch (e) { showError(e.message); }
+            finally { isSyncing = false; syncBtn.disabled = false; syncIcon.classList.remove('loading'); syncText.textContent = 'Sync from Pinecone'; }
+        }
+
+        searchForm.addEventListener('submit', (e) => { e.preventDefault(); const query = searchInput.value.trim(); if (query) performSearch(query); });
+        uploadForm.addEventListener('submit', (e) => { e.preventDefault(); const file = csvFileInput.files[0]; if (file) uploadFile(file); });
+        syncBtn.addEventListener('click', () => { syncFromPinecone(); });
+        csvFileInput.addEventListener('change', (e) => { uploadBtn.disabled = !e.target.files[0]; });
+        document.querySelectorAll('.example-btn').forEach(btn => { btn.addEventListener('click', () => { const query = btn.getAttribute('data-query'); searchInput.value = query; performSearch(query); }); });
+
+        const voiceSearchBtn = document.getElementById('voice-search-btn');
+        const voiceIcon = document.getElementById('voice-icon');
+        const voiceText = document.getElementById('voice-text');
+        const deleteStoriesBtn = document.getElementById('delete-stories-btn');
+        let isRecording = false; let mediaRecorder; let audioChunks = [];
+        voiceSearchBtn.addEventListener('click', async () => {
+            if (!isRecording) { try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); mediaRecorder = new MediaRecorder(stream); mediaRecorder.ondataavailable = (event) => { audioChunks.push(event.data); }; mediaRecorder.onstop = async () => { const audioBlob = new Blob(audioChunks, { type: 'audio/wav' }); await sendVoiceSearch(audioBlob); audioChunks = []; }; mediaRecorder.start(); isRecording = true; voiceIcon.classList.add('animate-pulse'); voiceText.textContent = 'Recording... Click to stop'; voiceSearchBtn.classList.add('bg-red-600'); voiceSearchBtn.classList.remove('bg-green-600'); } catch (error) { showError('Microphone access denied'); } }
+            else { mediaRecorder.stop(); isRecording = false; voiceIcon.classList.remove('animate-pulse'); voiceText.textContent = 'Processing...'; voiceSearchBtn.disabled = true; }
+        });
+        async function sendVoiceSearch(audioBlob) {
+            try { const fd = new FormData(); fd.append('audio', audioBlob, 'voice_search.wav'); const r = await fetch('/voice-search', { method: 'POST', body: fd }); if (!r.ok) throw new Error('Voice search failed'); const data = await r.json(); searchInput.value = data.enhanced_query; renderResults(data.results || [], data.enhanced_query); if (data.original_query !== data.enhanced_query) { alert(`Voice: "${data.original_query}"\nEnhanced: "${data.enhanced_query}"`); } }
+            catch (e) { showError('Voice search failed: ' + e.message); }
+            finally { voiceText.textContent = 'Voice Search'; voiceSearchBtn.disabled = false; voiceSearchBtn.classList.remove('bg-red-600'); voiceSearchBtn.classList.add('bg-green-600'); }
+        }
+
+        const viewFeedbackBtn = document.getElementById('view-feedback-btn');
+        async function showFeedbackModal(feedbackData) {
+            const modal = document.createElement('div'); modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50';
+            const content = document.createElement('div'); content.className = 'bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[80vh] overflow-hidden flex flex-col';
+            content.innerHTML = `
+                <div class="p-6 border-b">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-2xl font-bold text-gray-900">All Feedback</h2>
+                        <button class="text-gray-500 hover:text-gray-700" onclick="this.closest('.fixed').remove()">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-6 overflow-auto flex-1">
+                    <div class="space-y-4">
+                        ${feedbackData.map(feedback => `
+                            <div class="bg-gray-50 rounded-lg p-4">
+                                <div class="flex items-start justify-between">
+                                    <div class="space-y-1">
+                                        <p class="text-sm font-medium text-gray-900">Query: "${feedback.query}"</p>
+                                        <p class="text-sm text-gray-600">Story ID: ${feedback.story_id}</p>
+                                        <p class="text-sm text-gray-500">${new Date(feedback.timestamp).toLocaleString()}</p>
+                                    </div>
+                                </div>
+                                <div class="mt-2">
+                                    <p class="text-gray-700">${feedback.feedback_text}</p>
+                                </div>
+                            </div>`).join('')}
+                    </div>
+                </div>`;
+            modal.appendChild(content); document.body.appendChild(modal);
+        }
+        viewFeedbackBtn.addEventListener('click', async () => { try { const r = await fetch('/get-feedback'); if (!r.ok) throw new Error('Failed to fetch feedback'); const data = await r.json(); showFeedbackModal(data.feedback); } catch (e) { showError('Failed to load feedback: ' + e.message); } });
+
+        deleteStoriesBtn.addEventListener('click', async () => { try { const r = await fetch('/list-stories'); const data = await r.json(); if (data.stories.length === 0) { alert('No stories to delete'); return; } const storyList = data.stories.map(s => `${s.id}: ${s.title}`).join('\n'); const confirmDelete = confirm(`Delete all ${data.stories.length} stories?\n\n${storyList.substring(0, 500)}${storyList.length > 500 ? '...' : ''}`); if (confirmDelete) { const storyIds = data.stories.map(s => s.id); const dr = await fetch('/delete-stories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ story_ids: storyIds }) }); if (!dr.ok) throw new Error('Delete failed'); const dd = await dr.json(); alert(dd.message); location.reload(); } } catch (e) { showError('Delete failed: ' + e.message); } });
+
+        async function loadFeedback() { const r = await fetch('/get-feedback'); if (r.ok) { const data = await r.json(); return data.feedback || []; } return []; }
+        async function getFeedback() { return loadFeedback(); }
+
+        checkHealth();
+    </script>
+</body>
+</html>
+
+
