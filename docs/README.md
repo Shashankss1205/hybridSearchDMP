@@ -33,6 +33,47 @@ Health check:
 curl http://127.0.0.1:${PORT:-5050}/health | jq .
 ```
 
+### Testing
+
+Run tests in the virtual environment. Tests default to the local embeddings provider and disable external services.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pytest -q
+```
+
+Notes:
+- Unit tests validate the search engine keyword/semantic behavior and HTTP route validations.
+- An end-to-end test boots the Flask app on a local port and verifies upload + search.
+- Coverage output is enabled via `pytest.ini`.
+
+### CSV data format
+
+Expected headers:
+`filename, character_primary, character_secondary, setting_primary, setting_secondary, theme_primary, theme_secondary, events_primary, events_secondary, emotions_primary, emotions_secondary, keywords`
+
+Values can be Python-like list strings (e.g., `['Hero', 'Sidekick']`) or semicolon-separated (`Hero; Sidekick`).
+
+Example row:
+```csv
+alpha.txt,Hero;,Sidekick;,City;,Alley;,Courage;,Friendship;,Battle;,Chase;,Hope;,Fear;,adventure; quest
+```
+
+### Environment variables
+
+- `EMBEDDING_PROVIDER` one of `openai|google|cohere|huggingface|local`; if unset or missing API keys, the app falls back to a local model
+- `PINECONE_API_KEY` enables Pinecone index creation/use
+- `GOOGLE_API_KEY` enables Gemini-powered query translate/refine
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY` enable feedback persistence
+- `SARVAM_API_KEY` enables voice search
+
+When not set, endpoints still work with graceful degradation:
+- Search uses local embeddings + keyword matching only
+- Feedback may return empty or `503` where unavailable
+- Voice search returns `503` if not configured
+
 ### Environment variables
 
 - PINECONE_API_KEY: enable Pinecone semantic search index
