@@ -1,3 +1,5 @@
 .venv/*
 *.out
 .pytest_cache/*
+.env
+./stories_test_backup.pkl
