@@ -1,0 +1,234 @@
+openapi: 3.0.3
+info:
+  title: Book Search API
+  version: 1.0.0
+  description: Hybrid search API for stories with semantic and lexical ranking
+servers:
+  - url: http://localhost:5050
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  pinecone_connected:
+                    type: boolean
+                  stories_loaded:
+                    type: integer
+                  embedding_provider:
+                    type: string
+                  embedding_dimension:
+                    type: integer
+  /search:
+    post:
+      summary: Search stories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                top_k:
+                  type: integer
+              required:
+                - query
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: string
+                  total_found:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        score:
+                          type: number
+                        matched_fields:
+                          type: object
+                          additionalProperties:
+                            type: number
+                        story:
+                          $ref: '#/components/schemas/Story'
+  /upload:
+    post:
+      summary: Upload CSV of stories
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required:
+                - file
+      responses:
+        '200':
+          description: Upload status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  stories_loaded:
+                    type: integer
+  /submit-feedback:
+    post:
+      summary: Submit feedback for a search result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                story_id:
+                  type: string
+                feedback:
+                  type: string
+              required:
+                - query
+                - story_id
+                - feedback
+      responses:
+        '200':
+          description: Saved
+        '503':
+          description: Feedback service unavailable
+  /voice-search:
+    post:
+      summary: Voice search using speech-to-text
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                audio:
+                  type: string
+                  format: binary
+              required:
+                - audio
+      responses:
+        '200':
+          description: Results
+        '503':
+          description: Voice service unavailable
+  /sync:
+    post:
+      summary: Sync stories from Pinecone (compatibility no-op)
+      responses:
+        '200':
+          description: Sync status
+  /delete-stories:
+    post:
+      summary: Delete stories by IDs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                story_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - story_ids
+      responses:
+        '200':
+          description: Delete status
+  /list-stories:
+    get:
+      summary: List in-memory stories
+      responses:
+        '200':
+          description: Stories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_count:
+                    type: integer
+                  stories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        filename:
+                          type: string
+                        title:
+                          type: string
+  /get-feedback:
+    get:
+      summary: List feedback records
+      responses:
+        '200':
+          description: Feedback list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  feedback:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        query: { type: string }
+                        story_id: { type: string }
+                        feedback_text: { type: string }
+                        timestamp: { type: string }
+                        user_ip: { type: string }
+
+components:
+  schemas:
+    Story:
+      type: object
+      properties:
+        id: { type: string }
+        filename: { type: string }
+        character_primary: { type: array, items: { type: string } }
+        character_secondary: { type: array, items: { type: string } }
+        setting_primary: { type: array, items: { type: string } }
+        setting_secondary: { type: array, items: { type: string } }
+        theme_primary: { type: array, items: { type: string } }
+        theme_secondary: { type: array, items: { type: string } }
+        events_primary: { type: array, items: { type: string } }
+        events_secondary: { type: array, items: { type: string } }
+        emotions_primary: { type: array, items: { type: string } }
+        emotions_secondary: { type: array, items: { type: string } }
+        keywords: { type: array, items: { type: string } }
+
+

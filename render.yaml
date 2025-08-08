@@ -3,7 +3,7 @@ services:
     name: hybrid-search
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python hostedSearch.py
+    startCommand: python server.py
     build:
       buildCommand: pip install -r requirements.txt
     buildpacks:

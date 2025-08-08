@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+You are a senior data engineer with experience in search systems. Your task is to implement a hybrid search system in which you use both lexical and semantics search to figure out the correct set of books to be shown based on the user's query.
